@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>驗屋糾紛 AI 法律幫手</title>
+<style>
+  :root { font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif; }
+  body { margin: 0; background: #f4f5f7; color: #1c1f24; }
+  header { background: #1c3d5a; color: #fff; padding: 16px 20px; }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 4px 0 0; font-size: 12px; opacity: .85; }
+  #chat { max-width: 720px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; min-height: 70vh; }
+  .msg { padding: 12px 14px; border-radius: 10px; line-height: 1.6; font-size: 14px; white-space: pre-wrap; }
+  .user { background: #1c3d5a; color: #fff; align-self: flex-end; max-width: 80%; }
+  .bot { background: #fff; border: 1px solid #e0e3e8; align-self: flex-start; max-width: 85%; }
+  .sources { margin-top: 8px; font-size: 12px; color: #555; }
+  .sources span { display: inline-block; background: #eef1f5; border-radius: 6px; padding: 2px 8px; margin: 2px 4px 0 0; }
+  form { position: sticky; bottom: 0; background: #f4f5f7; display: flex; gap: 8px; padding: 12px; max-width: 720px; margin: 0 auto; }
+  textarea { flex: 1; resize: none; border: 1px solid #ccd2da; border-radius: 8px; padding: 10px; font-size: 14px; }
+  button { background: #1c3d5a; color: #fff; border: none; border-radius: 8px; padding: 0 18px; font-size: 14px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .disclaimer { font-size: 11px; color: #888; text-align: center; padding: 6px 16px 16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>驗屋糾紛 AI 法律幫手</h1>
+  <p>協助理解驗屋 / 預售屋・成屋交易相關法律問題，非正式法律意見</p>
+</header>
+<div id="chat"></div>
+<form id="form">
+  <textarea id="input" rows="2" placeholder="請描述你的驗屋糾紛問題，例如：交屋驗收發現牆面裂縫，建商不理會怎麼辦？"></textarea>
+  <button type="submit" id="sendBtn">送出</button>
+</form>
+<div class="disclaimer">本服務為 AI 自動生成內容，僅供一般法律資訊參考，不構成正式法律意見，具體案件請洽律師或不動產糾紛調處機關。</div>
+
+<script>
+const chatEl = document.getElementById('chat');
+const formEl = document.getElementById('form');
+const inputEl = document.getElementById('input');
+const sendBtn = document.getElementById('sendBtn');
+
+function addMessage(text, role, sources) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.textContent = text;
+  if (sources && sources.length) {
+    const s = document.createElement('div');
+    s.className = 'sources';
+    s.innerHTML = '參考法條：' + sources.map(x => `<span>${x.law_name} 第${x.article_no}條</span>`).join('');
+    div.appendChild(s);
+  }
+  chatEl.appendChild(div);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+formEl.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const question = inputEl.value.trim();
+  if (!question) return;
+  addMessage(question, 'user');
+  inputEl.value = '';
+  sendBtn.disabled = true;
+  const loadingDiv = document.createElement('div');
+  loadingDiv.className = 'msg bot';
+  loadingDiv.textContent = '思考中...';
+  chatEl.appendChild(loadingDiv);
+  chatEl.scrollTop = chatEl.scrollHeight;
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question }),
+    });
+    const data = await res.json();
+    loadingDiv.remove();
+    if (!res.ok) {
+      addMessage('發生錯誤：' + (data.detail || res.statusText), 'bot');
+    } else {
+      addMessage(data.answer, 'bot', data.sources);
+    }
+  } catch (err) {
+    loadingDiv.remove();
+    addMessage('連線失敗：' + err.message, 'bot');
+  } finally {
+    sendBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
