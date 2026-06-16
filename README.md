@@ -59,8 +59,16 @@ python -m app.build_index
 > - `missing_in_source`：白名單裡的法規名稱在官方資料裡找不到對應項目（可能名稱打錯或法規已改名）
 > - `no_articles_parsed`：抓到法規但條文解析失敗（官方 JSON 欄位名稱可能有變動，需要打開 `app/law_updater.py` 的 `_extract_articles()` 調整欄位對應）
 >
-> 法務部官方 API 不包含「預售屋/成屋買賣定型化契約應記載及不得記載事項」這類內政部公告，
-> 請依照 `backend/data/manual_docs/README.md` 的說明手動補上正式條文，再重跑 `build_index`。
+> 法務部官方 API 不包含「預售屋/成屋買賣定型化契約應記載及不得記載事項」這類內政部公告。
+> 這些文件放在 `glrs.moi.gov.tw`（內政部主管法規共用系統），會擋掉雲端環境常見的爬蟲 UA，
+> 所以請在你自己的電腦/伺服器（一般網路即可）執行：
+>
+> ```bash
+> python -m app.fetch_manual_docs
+> ```
+>
+> 抓完務必打開 `backend/data/manual_docs/*.json` 核對內容是否為最新版本（網站改版可能讓自動分條失敗，
+> 腳本會印出警告提示需要人工檢查），再重跑 `python -m app.build_index`。
 
 ## Step 5：啟動後端
 
