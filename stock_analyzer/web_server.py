@@ -10,8 +10,10 @@
 import sys
 import os
 import time
+import asyncio
 import secrets
 import argparse
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Optional
 
@@ -32,7 +34,62 @@ from catalyst import get_upcoming_catalysts, MAJOR_CONFERENCES_2026
 from valuation import (calc_biotech_valuation, calc_product_npv,
                         calc_milestone_scenarios, calc_biotech_valuation_live)
 
-app = FastAPI(title='台灣生技股儀表板')
+def _fetch_stock_sync(code: str) -> dict:
+    name = STOCKS[code]['name']
+    stock_type = STOCKS[code]['type']
+    from fetcher import get_price, get_price_history
+    from chip import full_chip_report
+    from alerts import check_price_alerts, check_chip_alerts, check_valuation_alerts
+    price = get_price(code)
+    price_hist = get_price_history(code, 20)
+    chip = full_chip_report(code, name)
+    val = None
+    val_alerts = []
+    if stock_type == 'biotech':
+        share_price = price.get('close', 0) if price else 0
+        val = calc_biotech_valuation(code, name, share_price=share_price)
+        val_alerts = check_valuation_alerts(code, name, val)
+    all_alerts = (check_price_alerts(code, name, price_hist)
+                  + check_chip_alerts(chip)
+                  + val_alerts)
+    return {
+        'code': code, 'name': name, 'type': stock_type,
+        'price': price, 'chip': chip,
+        'valuation': val, 'alerts': all_alerts,
+        'updated': datetime.now().strftime('%Y-%m-%d %H:%M'),
+    }
+
+async def _prewarm_all():
+    await asyncio.sleep(5)
+    for code in list(STOCKS.keys()):
+        if not _cache_get(f'stock_{code}'):
+            try:
+                result = await asyncio.to_thread(_fetch_stock_sync, code)
+                _cache_set(f'stock_{code}', result)
+            except Exception:
+                pass
+        await asyncio.sleep(2)
+
+async def _refresh_loop():
+    while True:
+        await asyncio.sleep(1800)
+        for code in list(STOCKS.keys()):
+            try:
+                result = await asyncio.to_thread(_fetch_stock_sync, code)
+                _cache_set(f'stock_{code}', result)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+@asynccontextmanager
+async def lifespan(application):
+    t1 = asyncio.create_task(_prewarm_all())
+    t2 = asyncio.create_task(_refresh_loop())
+    yield
+    t1.cancel()
+    t2.cancel()
+
+app = FastAPI(title='台灣生技股儀表板', lifespan=lifespan)
 
 # ── 簡易快取（30分鐘 TTL）──────────────────────────────────────
 _cache: dict[str, tuple] = {}
@@ -241,41 +298,13 @@ async def api_stock(code: str):
     if cached:
         return cached
 
-    name = STOCKS[code]['name']
-    stock_type = STOCKS[code]['type']
-
     try:
-        from fetcher import get_price, get_price_history
-        from chip import full_chip_report
-        from alerts import check_price_alerts, check_chip_alerts, check_valuation_alerts
-
-        price = get_price(code)
-        price_hist = get_price_history(code, 20)
-        chip = full_chip_report(code, name)
-
-        val = None
-        val_alerts = []
-        if stock_type == 'biotech':
-            share_price = price.get('close', 0) if price else 0
-            val = calc_biotech_valuation(code, name, share_price=share_price)
-            val_alerts = check_valuation_alerts(code, name, val)
-
-        all_alerts = (check_price_alerts(code, name, price_hist)
-                      + check_chip_alerts(chip)
-                      + val_alerts)
-
-        result = {
-            'code': code, 'name': name, 'type': stock_type,
-            'price': price, 'chip': chip,
-            'valuation': val, 'alerts': all_alerts,
-            'updated': datetime.now().strftime('%Y-%m-%d %H:%M'),
-        }
+        result = await asyncio.to_thread(_fetch_stock_sync, code)
         _cache_set(f'stock_{code}', result)
         return result
-
     except Exception as e:
         return JSONResponse(status_code=500, content={
-            'error': str(e), 'code': code, 'name': name,
+            'error': str(e), 'code': code, 'name': STOCKS[code]['name'],
             'hint': '確認電腦有連上台灣網路，且今天是交易日（週一~週五）',
         })
 
@@ -565,7 +594,7 @@ console.log('[biotech] JS loaded, checking DOM...');
 (function(){
   var e=document.getElementById('mc');
   console.log('[biotech] mc element:', e ? 'FOUND id='+e.id : 'NULL - not found!');
-  if(e)e.innerHTML='<div class="loading"><div class="sp"></div><p>連線中，首次載入約5~15秒...</p></div>';
+  if(e)e.innerHTML='<div class="loading"><div class="sp"></div><p>連線中，首次載入約15~45秒...</p></div>';
   else document.body&&(document.body.style.background='red');
 })();
 console.log('[biotech] IIFE done');
@@ -582,7 +611,7 @@ window.onunhandledrejection=function(ev){
 function $(i){return document.getElementById(i);}
 function mc(h){var e=$("mc");if(e)e.innerHTML=h;}
 async function init(){
-  mc('<div class="loading"><div class="sp"></div><p>連線中，首次載入約5~15秒...</p></div>');
+  mc('<div class="loading"><div class="sp"></div><p>連線中，首次載入約15~45秒...</p></div>');
   try{
     stocks=await jget("/api/stocks");
     rg();rt();
@@ -1024,7 +1053,7 @@ async function jcached(url){
 }
 async function jget(url){
   var ctrl=new AbortController();
-  var tid=setTimeout(function(){ctrl.abort();},15000);
+  var tid=setTimeout(function(){ctrl.abort();},45000);
   try{
     var r=await fetch(url,{signal:ctrl.signal});
     clearTimeout(tid);
@@ -1033,7 +1062,7 @@ async function jget(url){
     return await r.json();
   }catch(ex){
     clearTimeout(tid);
-    if(ex.name==='AbortError')throw new Error('伺服器回應逾時（15秒），請稍後重試');
+    if(ex.name==='AbortError')throw new Error('伺服器回應逾時（45秒），請稍後重試');
     throw ex;
   }
 }
