@@ -157,6 +157,11 @@ async def index():
     return HTMLResponse(content=_HTML)
 
 
+@app.get('/api/health')
+async def api_health():
+    return {'ok': True, 'time': datetime.now().isoformat()}
+
+
 @app.get('/api/stocks')
 async def api_stocks():
     return [
@@ -534,12 +539,15 @@ td{padding:7px 6px;border-bottom:1px solid #f0f0f0;vertical-align:middle;}
 </div>
 <script>
 var stocks=[],sel=null,tab="cat",cache={};
+window.onerror=function(msg,src,line){mc('<div class="card" style="color:#c62828">JS錯誤：'+msg+' ('+line+')</div>');return false;};
+window.onunhandledrejection=function(ev){mc('<div class="card" style="color:#c62828">非同步錯誤：'+(ev.reason&&ev.reason.message||ev.reason)+'</div>');};
 async function init(){
+  mc('<div class="loading"><div class="sp"></div><p>連線中，首次載入約5~15秒...</p></div>');
   try{
     stocks=await jget("/api/stocks");
     rg();rt();
   }catch(e){
-    mc("\\u767c\\u751f\\u932f\\u8aa4\\uff1a"+e.message);
+    mc('<div class="card" style="color:#c62828;padding:16px">⚠️ 載入失敗：'+e.message+'<br><button onclick="init()" style="margin-top:8px;padding:6px 16px;background:#1a237e;color:#fff;border:none;border-radius:6px;cursor:pointer">重試</button></div>');
   }
 }
 function $(i){return document.getElementById(i);}
@@ -977,7 +985,19 @@ async function jcached(url){
   var data=await jget(url);cache[url]={data:data,ts:Date.now()};return data;
 }
 async function jget(url){
-  var r=await fetch(url);if(!r.ok)throw new Error("HTTP "+r.status);return r.json();
+  var ctrl=new AbortController();
+  var tid=setTimeout(function(){ctrl.abort();},15000);
+  try{
+    var r=await fetch(url,{signal:ctrl.signal});
+    clearTimeout(tid);
+    if(r.status===401){window.location.href='/login';throw new Error('請重新登入');}
+    if(!r.ok)throw new Error("HTTP "+r.status);
+    return await r.json();
+  }catch(ex){
+    clearTimeout(tid);
+    if(ex.name==='AbortError')throw new Error('伺服器回應逾時（15秒），請稍後重試');
+    throw ex;
+  }
 }
 
 /* ── 查詢任意股票 ── */
