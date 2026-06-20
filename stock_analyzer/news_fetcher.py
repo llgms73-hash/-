@@ -120,18 +120,17 @@ def get_all_monitored_trials() -> dict[str, list[dict]]:
     """抓取所有監控股票的 ClinicalTrials.gov 資料"""
     results = {}
 
-    # 公司名稱關鍵字對應（用於 CT.gov 搜尋）
     company_keywords = {
-        '7827': ['HanchorBio', 'Hanchor', 'HCB101'],
+        '7827': ['HanchorBio', 'HCB101'],
         '6919': ['Caliway', 'CBL-514'],
         '6467': ['Taho', 'TAH3311'],
-        '6917': ['Andros', 'APC201', 'APC101'],
+        '6917': ['Andros', 'APC201'],
     }
 
     for code, keywords in company_keywords.items():
         name = STOCKS.get(code, {}).get('name', code)
         all_trials = []
-        for kw in keywords[:2]:  # 只搜前兩個關鍵字，避免過多請求
+        for kw in keywords[:2]:
             trials = get_ct_trials(company=kw, max_results=5)
             for t in trials:
                 if not any(x['nct_id'] == t['nct_id'] for x in all_trials):
@@ -140,6 +139,117 @@ def get_all_monitored_trials() -> dict[str, list[dict]]:
         results[code] = {'name': name, 'trials': all_trials}
 
     return results
+
+
+# ── 即時進度比對（讓估值保持最新）──────────────────────────────
+
+_CT_DRUG_MAP = {
+    '7827': [('HCB101',  'HanchorBio')],
+    '6919': [('CBL-514', 'Caliway'),   ('CBL514', None)],
+    '6467': [('TAH3311', 'Taho'),      ('Apixaban', 'Taho')],
+    '6917': [('APC201',  'Andros'),    ('APC101',  'Andros')],
+}
+
+_PHASE_ORDER_CT = ['Pre-IND', 'Phase1', 'Phase2', 'Phase3', 'NDA/BLA', 'Approved']
+
+
+def _ct_phase_to_config(ct_phase: str) -> str | None:
+    """CT.gov Phase 字串轉換為 config.py 格式，取最高階段"""
+    if not ct_phase or ct_phase in ('N/A', 'NA', ''):
+        return None
+    ct_norm = ct_phase.upper().replace(' ', '').replace('_', '')
+    for ph in reversed(_PHASE_ORDER_CT):
+        if ph.replace(' ', '').upper() in ct_norm:
+            return ph
+    return None
+
+
+def _trial_matches_product(trial_title: str, product_name: str) -> bool:
+    """比對藥物代號（如 HCB101、CBL-514）在試驗標題中是否出現"""
+    codes = re.findall(r'[A-Z]{2,5}-?\d{2,5}', product_name.upper())
+    if not codes:
+        return False
+    t_norm = trial_title.upper().replace('-', '').replace(' ', '')
+    return any(c.replace('-', '') in t_norm for c in codes)
+
+
+def get_live_pipeline_status(code: str) -> dict:
+    """
+    從 ClinicalTrials.gov 取得最新臨床進度，並與 config.py 比對。
+
+    回傳：
+      trials    → CT.gov 查到的所有相關試驗
+      updates   → config 與 CT.gov 不一致的項目
+      overrides → 可傳入 calc_biotech_valuation_live() 的 phase 覆蓋字典
+      checked_at→ 查詢時間
+
+    若 CT.gov 顯示 Phase3 但 config 是 Phase2，
+    overrides = {'HCB101-胃癌(2L)': {'phase': 'Phase3'}}
+    傳給 calc_biotech_valuation_live() 即可用最新進度估算。
+    """
+    search_pairs = _CT_DRUG_MAP.get(code, [])
+    if not search_pairs:
+        return {'trials': [], 'updates': [], 'overrides': {},
+                'error': f'代號 {code} 無 CT.gov 搜尋設定'}
+
+    all_trials, seen = [], set()
+    for drug_kw, sponsor_kw in search_pairs:
+        kw = sponsor_kw or drug_kw
+        trials = get_ct_trials(company=kw, max_results=15)
+        for t in trials:
+            drug_norm = drug_kw.upper().replace('-', '')
+            title_norm = t['title'].upper().replace('-', '')
+            spons_norm = (t.get('sponsor') or '').upper().replace('-', '')
+            if drug_norm not in title_norm and drug_norm not in spons_norm:
+                continue
+            if t['nct_id'] not in seen:
+                seen.add(t['nct_id'])
+                all_trials.append(t)
+        time.sleep(0.4)
+
+    config_products = PIPELINE.get(code, {}).get('products', [])
+    updates, overrides = [], {}
+
+    for prod in config_products:
+        config_phase = prod.get('phase', '')
+        prod_name    = prod.get('name', '')
+
+        best = next((t for t in all_trials if _trial_matches_product(t['title'], prod_name)), None)
+        if not best:
+            continue
+
+        live_phase = _ct_phase_to_config(best['phase'])
+        ct_status  = best.get('status', '')
+
+        is_advanced = (
+            live_phase and config_phase in _PHASE_ORDER_CT and live_phase in _PHASE_ORDER_CT
+            and _PHASE_ORDER_CT.index(live_phase) > _PHASE_ORDER_CT.index(config_phase)
+        )
+        is_completed = ct_status in ('COMPLETED', 'TERMINATED', 'WITHDRAWN')
+
+        updates.append({
+            'product':       prod_name,
+            'config_phase':  config_phase,
+            'live_phase':    live_phase,
+            'ct_status':     ct_status,
+            'nct_id':        best['nct_id'],
+            'last_update':   best.get('last_update', ''),
+            'completion_dt': best.get('completion_date', ''),
+            'is_advanced':   is_advanced,
+            'is_completed':  is_completed,
+            'has_update':    is_advanced or (is_completed and config_phase != 'Approved'),
+            'ct_url':        best.get('url', ''),
+        })
+
+        if is_advanced and live_phase:
+            overrides[prod_name] = {'phase': live_phase}
+
+    return {
+        'trials':     all_trials,
+        'updates':    updates,
+        'overrides':  overrides,
+        'checked_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
+    }
 
 
 # ── FDA 新藥核准 RSS ────────────────────────────────────────────

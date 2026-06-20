@@ -29,7 +29,8 @@ except ImportError:
 
 from config import STOCKS, PIPELINE
 from catalyst import get_upcoming_catalysts, MAJOR_CONFERENCES_2026
-from valuation import calc_biotech_valuation, calc_product_npv, calc_milestone_scenarios
+from valuation import (calc_biotech_valuation, calc_product_npv,
+                        calc_milestone_scenarios, calc_biotech_valuation_live)
 
 app = FastAPI(title='台灣生技股儀表板')
 
@@ -377,6 +378,57 @@ async def api_trials(code: str):
         return JSONResponse(status_code=500, content={'error': str(e)})
 
 
+@app.get('/api/live-pipeline/{code}')
+async def api_live_pipeline(code: str):
+    """
+    即時從 ClinicalTrials.gov 比對最新臨床進度 vs config.py
+    若有進展，同時回傳「即時估值」與「config估值」兩個結果
+    快取 4 小時（CT.gov 資料不會分鐘級更新）
+    """
+    if code not in STOCKS:
+        raise HTTPException(404, f'股票代號 {code} 不在監控清單')
+
+    cached = _cache_get(f'live_pipeline_{code}')
+    if cached:
+        return cached
+
+    name = STOCKS[code]['name']
+    try:
+        from news_fetcher import get_live_pipeline_status
+
+        live = get_live_pipeline_status(code)
+        overrides = live.get('overrides', {})
+
+        # 基準估值（config.py 版本）
+        base_val = calc_biotech_valuation(code, name)
+
+        # 即時估值（若有進展才會不同）
+        live_val = None
+        if overrides:
+            live_val = calc_biotech_valuation_live(code, name,
+                                                    live_overrides=overrides)
+
+        result = {
+            'code':           code,
+            'name':           name,
+            'live_status':    live,
+            'base_valuation': base_val,
+            'live_valuation': live_val,
+            'has_advance':    bool(overrides),
+            'checked_at':     live.get('checked_at', ''),
+        }
+
+        # 即時資料快取 4 小時（CT.gov 不需要分鐘級刷新）
+        _cache[f'live_pipeline_{code}'] = (result, time.time() - CACHE_TTL + 14400)
+        return result
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            'error': str(e), 'code': code,
+            'hint': 'ClinicalTrials.gov 查詢失敗，請確認已連上網路'
+        })
+
+
 # ── 網頁 HTML（行動裝置友善）──────────────────────────────────
 
 _HTML = '''<!DOCTYPE html>
@@ -660,13 +712,106 @@ async function tVal(){
     }else if(val&&val.status){
       h+='<div class="card"><p>⚠️ '+val.status+"</p></div>";
     }
-    // 里程碑市值對照表（本地計算，不需網路，快速）
+    // ── 即時臨床進度比對（CT.gov vs config）────────────────────
+    h+='<div id="live_status_area"><div class="edu" style="font-size:12px">⏳ 正在向 ClinicalTrials.gov 查詢最新臨床進度...</div></div>';
+    mc(h);
+    // 非同步載入即時進度（不阻塞主要估值顯示）
+    jget("/api/live-pipeline/"+sel).then(function(lv){
+      var la=document.getElementById("live_status_area");
+      if(!la)return;
+      var lh=rLiveStatus(lv);
+      la.innerHTML=lh;
+    }).catch(function(){
+      var la=document.getElementById("live_status_area");
+      if(la)la.innerHTML='<div class="edu" style="font-size:11px;color:#bbb">⚠️ CT.gov 查詢逾時（非交易時段或網路較慢，不影響本頁估值）</div>';
+    });
+    // 里程碑市值對照表（本地計算）
     try{
       var ms=await jget("/api/milestones/"+sel+(curPrice?"?price="+curPrice:""));
-      h+=rMilestone(ms);
+      var msel=document.getElementById("live_status_area");
+      if(msel)msel.insertAdjacentHTML("afterend",rMilestone(ms));
     }catch(ex){}
-    mc(h);
   }catch(e){mc(err(e.message));}
+}
+
+/* ── CT.gov 即時進度比對渲染 ── */
+function rLiveStatus(lv){
+  if(!lv||lv.error)return'<div class="edu" style="font-size:11px;color:#bbb">⚠️ CT.gov 即時查詢無結果：'+(lv&&lv.error||"逾時")+"</div>";
+  var updates=lv.live_status&&lv.live_status.updates||[];
+  var overrides=lv.live_status&&lv.live_status.overrides||{};
+  var hasAdv=lv.has_advance;
+  var checked=lv.checked_at||lv.live_status&&lv.live_status.checked_at||"";
+
+  // ── 進度比對結果 ──
+  var h='<div class="card"><div class="ct">📡 ClinicalTrials.gov 即時進度核對 <span style="font-size:11px;font-weight:400;color:#888">'+checked+"</span></div>"
+    +edu(hasAdv
+      ?"🚨 <b>偵測到進度更新！</b> CT.gov 顯示的臨床進度比 config.py 更新，下方「即時估值」已自動用最新 Phase 重算，請確認後更新 config.py。"
+      :"✅ CT.gov 資料與 config.py 一致（或未能匹配到試驗），估值使用 config 資料。<br>若公司最近有重大進展，建議更新 config.py。");
+
+  if(updates.length){
+    h+="<table><tr><th>產品</th><th>config 階段</th><th>CT.gov 階段</th><th>試驗狀態</th><th>最後更新</th><th>查看</th></tr>"
+      +updates.map(function(u){
+        var adv=u.is_advanced;
+        var comp=u.is_completed&&!adv;
+        var row_style=adv?'style="background:#fff8e1"':comp?'style="background:#e3f2fd"':"";
+        return'<tr '+row_style+'>'
+          +'<td style="font-size:11px">'+u.product+"</td>"
+          +'<td>'+pb(u.config_phase)+"</td>"
+          +'<td>'+(adv?'<span style="background:#ffecb3;color:#e65100;padding:2px 6px;border-radius:6px;font-size:11px;font-weight:700">⬆ '+u.live_phase+"</span>":pb(u.live_phase||u.config_phase))+"</td>"
+          +'<td style="font-size:11px;color:#888">'+_ctStatus(u.ct_status)+"</td>"
+          +'<td style="font-size:10px;color:#aaa">'+(u.last_update||"—")+"</td>"
+          +'<td>'+(u.nct_id?'<a href="'+(u.ct_url||"#")+'" target="_blank" style="font-size:11px;color:#1565c0">'+u.nct_id+"</a>":"—")+"</td>"
+          +"</tr>";
+      }).join("")+"</table>";
+  }else{
+    h+='<div style="color:#bbb;font-size:13px;padding:8px">CT.gov 未查詢到匹配的試驗（可能因公司規模小，試驗未登錄到 CT.gov，或藥物代號不符）</div>';
+  }
+  h+="</div>";
+
+  // ── 即時估值 vs config 估值對照 ──
+  if(hasAdv&&lv.live_valuation){
+    var bv=lv.base_valuation,lval=lv.live_valuation;
+    var bTotal=(bv.total_pipeline_twd_mn||0)/100;
+    var lTotal=(lval.total_pipeline_twd_mn_live||0)/100;
+    var uplift=((lval.live_uplift_twd_mn||0)/100).toFixed(1);
+    h+='<div class="card" style="border:2px solid #fb8c00"><div class="ct">🔄 即時估值 vs config 估值對照</div>'
+      +edu("CT.gov 顯示有進展，<b>下方即時估值已自動用最新 Phase 重算</b>。"
+        +"若確認公告屬實，請更新 config.py 的 phase 欄位，使兩者一致。");
+    h+='<div class="sg">'
+      +sc("config 估值(億台幣)",bTotal.toFixed(1))
+      +sc("即時估值(億台幣)",'<span style="color:#e65100;font-weight:700">'+lTotal.toFixed(1)+"</span>")
+      +sc("即時估值增加",uplift>=0?'<span style="color:#e65100">+'+uplift+"億</span>":'<span style="color:#2e7d32">'+uplift+"億</span>")
+      +sc("更新項目",Object.keys(overrides).length+"個產品")
+      +"</div>"
+      +'<div style="font-size:12px;color:#888;margin-top:8px">📝 <b>更新 config.py 方法</b>：'
+      +"找到對應產品的 'phase' 欄位，改成 CT.gov 顯示的新 Phase，儲存後重啟伺服器即生效。"
+      +"</div></div>";
+    // 即時產品 NPV 明細
+    var liveProd=lval.pipeline_products_live||[];
+    if(liveProd.length){
+      h+='<div class="card"><div class="ct">💊 即時 Pipeline rNPV（用最新 Phase 重算）</div>'
+        +"<table><tr><th>產品</th><th>階段</th><th>成功率</th><th>rNPV(億台幣)</th><th>說明</th></tr>"
+        +liveProd.map(function(p){
+          var upd=p._live_updated;
+          return"<tr"+(upd?' style="background:#fff8e1"':"")+">"
+            +"<td style='font-size:11px'>"+p.name+"</td>"
+            +"<td>"+pb(p.phase)+(upd?'<span style="font-size:9px;color:#e65100;margin-left:3px">↑CT.gov</span>':"")+"</td>"
+            +"<td>"+(p.prob_success*100).toFixed(0)+"%</td>"
+            +"<td style='font-weight:600'>"+(p.rnpv_twd_mn/100).toFixed(1)+"</td>"
+            +"<td style='font-size:10px;color:#888'>"+(upd?"原"+p._original_phase+"→"+p.phase:"config資料")+"</td>"
+            +"</tr>";
+        }).join("")+"</table></div>";
+    }
+  }
+  return h;
+}
+function _ctStatus(s){
+  var m={
+    'RECRUITING':'🟢 收案中','ACTIVE_NOT_RECRUITING':'🔵 收案完成/試驗進行中',
+    'COMPLETED':'✅ 已完成','NOT_YET_RECRUITING':'⏳ 尚未開始收案',
+    'TERMINATED':'🔴 已終止','WITHDRAWN':'⚫ 已撤回','ENROLLING_BY_INVITATION':'🟡 邀請收案',
+  };
+  return m[s]||s||'—';
 }
 
 /* ── 里程碑市值對照表渲染 ── */

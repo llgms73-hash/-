@@ -161,6 +161,95 @@ def calc_biotech_valuation(code: str, name: str,
     }
 
 
+# ── 即時進度覆蓋估值 ─────────────────────────────────────────
+
+def apply_live_phase_override(products: list, overrides: dict) -> list:
+    """
+    把 get_live_pipeline_status() 回傳的 overrides 套用到 products 副本
+    overrides 格式：{'product_name': {'phase': 'Phase3'}}
+
+    自動調整：
+      - prob_success → 新 Phase 的歷史成功率
+      - discount_rate → 新 Phase 的折現率
+      - years_to_mkt → 扣除已完成 Phase 的年數
+    """
+    from copy import deepcopy
+    updated = []
+    for p in products:
+        p_copy = deepcopy(p)
+        ov = overrides.get(p_copy.get('name', ''))
+        if ov:
+            new_phase = ov.get('phase')
+            old_phase = p_copy.get('phase', 'Phase1')
+            if new_phase and new_phase in PHASE_SUCCESS_RATES:
+                p_copy['phase']        = new_phase
+                p_copy['prob_success'] = PHASE_SUCCESS_RATES[new_phase]
+                p_copy['discount_rate'] = DISCOUNT_RATES.get(new_phase, 0.15)
+                # 縮短距上市年數：扣除已完成的各階段平均耗時
+                if old_phase in _PHASE_ORDER and new_phase in _PHASE_ORDER:
+                    old_idx = _PHASE_ORDER.index(old_phase)
+                    new_idx = _PHASE_ORDER.index(new_phase)
+                    if new_idx > old_idx:
+                        saved_yrs = sum(
+                            _PHASE_DURATION.get(_PHASE_ORDER[i], 2.0)
+                            for i in range(old_idx, new_idx)
+                        )
+                        p_copy['years_to_mkt'] = max(0.5, p_copy.get('years_to_mkt', 5) - saved_yrs)
+                p_copy['_live_updated']    = True
+                p_copy['_original_phase']  = old_phase
+        updated.append(p_copy)
+    return updated
+
+
+def calc_biotech_valuation_live(code: str, name: str,
+                                 live_overrides: dict = None,
+                                 share_price: float = 0) -> dict:
+    """
+    生技股估值，支援即時 Phase 覆蓋。
+
+    若 CT.gov 顯示進度比 config.py 更先進，
+    傳入 live_overrides = {'HCB101-胃癌(2L)': {'phase': 'Phase3'}}
+    即可用最新進度重算，並在結果中標示哪些產品已更新。
+
+    回傳欄位（比 calc_biotech_valuation 多）：
+      has_live_update        → 是否有即時更新
+      pipeline_products_live → 使用即時 phase 計算的產品列表
+      total_pipeline_twd_mn_live → 即時估值合計（億台幣）
+      live_uplift_twd_mn     → 即時估值比 config 多出多少
+    """
+    from copy import deepcopy
+
+    info     = PIPELINE.get(code, {})
+    products = info.get('products', [])
+
+    # 先跑 config 版本
+    base = calc_biotech_valuation(code, name, share_price)
+
+    if not live_overrides or not products:
+        base['has_live_update'] = False
+        return base
+
+    # 套用即時覆蓋，重算
+    live_products = apply_live_phase_override(products, live_overrides)
+    live_npvs     = [calc_product_npv(p) for p in live_products]
+
+    # 把 _live_updated 標記帶入 npv 結果
+    for i, npv in enumerate(live_npvs):
+        if live_products[i].get('_live_updated'):
+            npv['_live_updated']   = True
+            npv['_original_phase'] = live_products[i].get('_original_phase', '')
+
+    live_total_twd = sum(p['rnpv_twd_mn'] for p in live_npvs)
+    uplift_twd     = live_total_twd - base.get('total_pipeline_twd_mn', 0)
+
+    base['has_live_update']              = True
+    base['pipeline_products_live']       = live_npvs
+    base['total_pipeline_twd_mn_live']   = round(live_total_twd, 0)
+    base['live_uplift_twd_mn']           = round(uplift_twd, 0)
+    base['live_overrides_applied']       = live_overrides
+    return base
+
+
 # ── 一般股票估值（有營收）────────────────────────────────────
 
 def calc_general_valuation(
