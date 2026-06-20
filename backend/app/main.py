@@ -87,6 +87,12 @@ def on_shutdown():
     scheduler.shutdown(wait=False)
 
 
-frontend_dir = BASE_DIR.parent / "frontend"
-if frontend_dir.exists():
-    app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
+# 在容器裡 frontend 會被 COPY 到 /code/frontend（Dockerfile 定義），
+# 本機開發時 frontend 在 backend 的上層目錄，兩個路徑都試一次
+for _frontend_candidate in [
+    BASE_DIR / "frontend",        # 容器路徑 /code/frontend
+    BASE_DIR.parent / "frontend", # 本機路徑 ../frontend
+]:
+    if _frontend_candidate.exists():
+        app.mount("/", StaticFiles(directory=str(_frontend_candidate), html=True), name="frontend")
+        break

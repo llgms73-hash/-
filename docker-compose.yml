@@ -1,0 +1,15 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # 讓 laws/ 和 chroma/ 的資料在容器重啟後保留
+      - ./backend/data:/code/data
+      # frontend 即時同步（開發用）
+      - ./frontend:/code/frontend:ro
+    env_file:
+      - ./backend/.env
+    restart: unless-stopped

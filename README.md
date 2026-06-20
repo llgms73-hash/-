@@ -70,7 +70,7 @@ python -m app.build_index
 > 抓完務必打開 `backend/data/manual_docs/*.json` 核對內容是否為最新版本（網站改版可能讓自動分條失敗，
 > 腳本會印出警告提示需要人工檢查），再重跑 `python -m app.build_index`。
 
-## Step 5：啟動後端
+## Step 5：本機測試
 
 ```bash
 uvicorn app.main:app --reload --port 8000
@@ -78,7 +78,7 @@ uvicorn app.main:app --reload --port 8000
 
 打開瀏覽器到 http://localhost:8000 即可看到聊天介面（FastAPI 會直接把 `frontend/` 當靜態網站服務）。
 
-## Step 6：法規自動更新
+## Step 8：法規自動更新
 
 `app/main.py` 內已經用 APScheduler 排程「每週日凌晨 3 點」自動重新下載法規並重建索引。
 若想手動立即更新，呼叫：
@@ -88,12 +88,51 @@ curl -X POST http://localhost:8000/api/admin/update-laws \
   -H "X-Admin-Token: 你在 .env 設定的 ADMIN_TOKEN"
 ```
 
-## Step 7：部署到正式環境（之後要做的事）
+## Step 6：讓手機 + 任何電腦都能使用（雲端部署）
 
-- 用 Docker 包成 image，搭配 Nginx 反向代理 + HTTPS
-- 把 `ADMIN_TOKEN`、`ANTHROPIC_API_KEY` 改用伺服器的 secret 管理機制，不要寫死在 .env 進版控
-- 視流量需要把 Chroma 換成獨立部署的向量資料庫
-- 考慮加上使用者問題紀錄與意見回饋機制，方便之後優化白名單與 prompt
+### 方式 A：Railway（最簡單，有免費額度）
+
+1. 去 https://railway.app 用 GitHub 帳號登入
+2. New Project → Deploy from GitHub repo → 選這個 repo
+3. 在 Railway 的 Variables 頁面加入環境變數：
+   - `ANTHROPIC_API_KEY` = 你的 API Key
+   - `ADMIN_TOKEN` = 自訂的管理密碼
+4. 部署完成後 Railway 會自動給一個 `https://xxx.railway.app` 的網址
+5. 用手機、電腦打開這個網址就能使用
+
+> Railway 的免費方案每個月有 $5 美元額度，低流量個人使用通常夠用。
+
+### 方式 B：Docker（自己的 VPS/NAS）
+
+```bash
+# 在你的伺服器上
+git clone <this repo>
+cd <repo>
+cp backend/.env.example backend/.env
+# 編輯 backend/.env 填入 ANTHROPIC_API_KEY 和 ADMIN_TOKEN
+
+docker compose up -d
+
+# 首次啟動後，還要下載法規並建立索引
+docker compose exec app python -m app.law_updater
+docker compose exec app python -m app.build_index
+# 如果要抓定型化契約文件（需在有網路的環境執行）
+docker compose exec app python -m app.fetch_manual_docs
+```
+
+伺服器 IP + 8000 port 就能從外部連線，建議前面再加 Nginx + Let's Encrypt 憑證（HTTPS）。
+
+### 方式 C：本機開發（同一 WiFi 下手機也能連）
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+手機和電腦在同一個 WiFi，手機用瀏覽器打開 `http://<電腦的區域網路IP>:8000` 即可。
+
+---
+
+## Step 7：法規自動更新
 
 ## 重要提醒
 
