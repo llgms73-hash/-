@@ -774,6 +774,16 @@ function rLiveStatus(lv){
     var bTotal=(bv.total_pipeline_twd_mn||0)/100;
     var lTotal=(lval.total_pipeline_twd_mn_live||0)/100;
     var uplift=((lval.live_uplift_twd_mn||0)/100).toFixed(1);
+    // 計算合理股價（NAV per share）
+    var bNav=bv.nav_per_share_twd;
+    var bTotalVal=bv.total_value_twd_mn||0;
+    var liveCash=bv.cash_twd_mn||0;
+    var liveNavPS=null;
+    if(bNav&&bNav>0&&bTotalVal>0){
+      var sharesMn=bTotalVal/bNav;
+      var lTotalVal=(lTotal*100)+liveCash;
+      liveNavPS=Math.round(lTotalVal/sharesMn*10)/10;
+    }
     h+='<div class="card" style="border:2px solid #fb8c00"><div class="ct">🔄 即時估值 vs config 估值對照</div>'
       +edu("CT.gov 顯示有進展，<b>下方即時估值已自動用最新 Phase 重算</b>。"
         +"若確認公告屬實，請更新 config.py 的 phase 欄位，使兩者一致。");
@@ -782,6 +792,8 @@ function rLiveStatus(lv){
       +sc("即時估值(億台幣)",'<span style="color:#e65100;font-weight:700">'+lTotal.toFixed(1)+"</span>")
       +sc("即時估值增加",uplift>=0?'<span style="color:#e65100">+'+uplift+"億</span>":'<span style="color:#2e7d32">'+uplift+"億</span>")
       +sc("更新項目",Object.keys(overrides).length+"個產品")
+      +(bNav?sc("config 合理股價(元)",bNav.toFixed(1)):"")
+      +(liveNavPS?sc("即時合理股價(元)",'<span style="color:#e65100;font-weight:700">'+liveNavPS.toFixed(1)+"</span>"):"")
       +"</div>"
       +'<div style="font-size:12px;color:#888;margin-top:8px">📝 <b>更新 config.py 方法</b>：'
       +"找到對應產品的 'phase' 欄位，改成 CT.gov 顯示的新 Phase，儲存後重啟伺服器即生效。"
@@ -1068,25 +1080,45 @@ async function tNews(){
     var cat_d=cache["/api/catalyst"]?cache["/api/catalyst"].data:null;
     if(!cat_d)try{cat_d=await jcached("/api/catalyst");}catch(ex){}
     if(cat_d){
-      var soon=(cat_d.events||[]).filter(function(e){return e.days_left!==null&&e.days_left>=0&&e.days_left<=60;});
-      soon.sort(function(a,b){return a.days_left-b.days_left;});
-      if(soon.length){
-        h2='<div class="card"><div class="ct">🔔 進程提醒：60天內到期里程碑（避免遺忘）</div>'
-          +edu("這是未來60天內即將發生的重要催化劑事件，可能大幅影響股價。<b>建議每週確認一次是否有最新消息。</b>");
-        soon.forEach(function(e){
-          var urg=e.days_left<=7?"ad":e.days_left<=30?"aw":"ap";
-          h2+='<div class="'+urg+'" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap">'
-            +'<div><b>'+e.name+'('+e.code+')</b><div style="font-size:12px">'+e.description+'</div>'
+      var allEvts=cat_d.events||[];
+      var nowYear=new Date().getFullYear();
+      // 有確定日期：未來60天內
+      var defDates=allEvts.filter(function(e){return e.days_left!==null&&e.days_left>=0&&e.days_left<=60;});
+      defDates.sort(function(a,b){return a.days_left-b.days_left;});
+      // 模糊日期（Q/H/年份）：今年或明年
+      var fuzzyDates=allEvts.filter(function(e){
+        if(e.days_left!==null)return false;
+        var yr=parseInt((e.date||"").substring(0,4));
+        return yr===nowYear||yr===nowYear+1;
+      });
+      var combined=defDates.concat(fuzzyDates);
+      if(combined.length){
+        h2='<div class="card"><div class="ct">🔔 進程提醒：近期及年內里程碑（避免遺忘）</div>'
+          +edu("🔴 今~7天 / ⚠️ 30天內 / ✅ 60天內 / 📅 年內模糊日期。<b>建議每週確認一次是否有最新消息。</b>");
+        combined.forEach(function(e){
+          var isFuzzy=e.days_left===null;
+          var urg,badge,dateLabel;
+          if(isFuzzy){
+            urg="ap";badge="📅";
+            dateLabel=e.date||"";
+          }else{
+            urg=e.days_left<=7?"ad":e.days_left<=30?"aw":"ap";
+            badge=e.days_left<=7?"🔴":e.days_left<=30?"⚠️":"✅";
+            var exact=e.date?'<span style="font-size:12px;font-weight:400;margin-right:6px">('+e.date+')</span>':"";
+            dateLabel=exact+(e.days_left===0?'<span style="color:#e53935">今日！</span>':e.days_left+'天後');
+          }
+          h2+='<div class="'+urg+'" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">'
+            +'<div><b>'+badge+' '+e.name+'('+e.code+')</b>'
+            +'<div style="font-size:12px">'+e.description+'</div>'
             +(e.product?'<div style="font-size:11px;color:#888">'+e.product+'</div>':"")
-            +'</div><div style="font-size:18px;font-weight:700;text-align:right;white-space:nowrap">'
-            +(e.days_left===0?'<span style="color:#e53935">今日！</span>':e.days_left+'天後')
-            +'</div></div>';
+            +'</div>'
+            +'<div style="font-size:15px;font-weight:700;text-align:right;white-space:nowrap">'+dateLabel+'</div>'
+            +'</div>';
         });
         h2+="</div>";
       }else{
         h2='<div class="card"><div class="ct">🔔 進程提醒</div>'
-          +'<div style="color:#bbb;padding:12px;text-align:center;font-size:13px">近60天內無明確到期催化劑事件<br>'
-          +'<span style="font-size:11px">（不代表沒有，部分事件為模糊日期如「2026-Q3」）</span></div></div>';
+          +'<div style="color:#bbb;padding:12px;text-align:center;font-size:13px">近60天內無明確到期，今明年亦無模糊日期催化劑</div></div>';
       }
     }
     h=h2+h;  // 里程碑提醒放最上面
