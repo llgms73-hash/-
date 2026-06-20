@@ -593,7 +593,7 @@ async function init(){
 function rg(){
   $("sg").innerHTML=stocks.map(function(s){
     return '<div class="scard'+(sel===s.code?" sel":"")
-      +'" onclick="ss(\''+s.code+'\')">'
+      +'" onclick="ss(\\\''+s.code+'\\\')">'
       +'<div class="scode">'+s.code+'</div>'
       +'<div class="sname">'+s.name+'</div>'
       +'<div><span class="badge '+(s.type==="biotech"?"bb":"bg")+'">'
@@ -1047,7 +1047,7 @@ function tSearch(){
     +'<div style="display:flex;gap:8px;margin-bottom:4px">'
     +'<input id="si" type="text" maxlength="6" placeholder="輸入代號，例如 2330" '
     +'style="flex:1;padding:10px 12px;border:2px solid #c5cae9;border-radius:8px;font-size:16px;outline:none"'
-    +' onkeypress="if(event.key===\'Enter\')dSearch()">'
+    +' onkeypress="if(event.key===\\\'Enter\\\')dSearch()">'
     +'<button onclick="dSearch()" style="background:#1a237e;color:white;border:none;'
     +'padding:10px 20px;border-radius:8px;font-size:15px;cursor:pointer;white-space:nowrap">查 詢</button>'
     +'</div>'
