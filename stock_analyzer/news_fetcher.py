@@ -3,7 +3,8 @@
 來源：
   - ClinicalTrials.gov API（公開）    → 臨床試驗詳情 / 解盲進度
   - FDA.gov RSS（公開）               → 新藥核准公告
-  - MOPS 公開資訊觀測站（台灣）       → 重大訊息 / 法說會
+  - TFDA RSS（台灣食藥署）            → 台灣新藥查驗登記動態
+  - MOPS 公開資訊觀測站（台灣）       → 重大訊息 / 法說會公告 / 附件
   - Reuters RSS（公開）               → 國際財經新聞
   - STAT News RSS（公開）             → 全球生技新聞
 """
@@ -30,6 +31,33 @@ def _get(url: str, params: dict = None, timeout: int = None) -> dict | str | Non
     except Exception as e:
         print(f'  [news_fetcher] {url[:60]}... → {e}')
         return None
+
+
+def _get_mops(url: str, params: dict) -> dict | None:
+    """MOPS 專用 GET，加上必要的 Referer"""
+    headers = dict(REQUEST_HEADERS)
+    headers['Referer'] = 'https://mops.twse.com.tw/'
+    try:
+        resp = requests.get(url, params=params, headers=headers,
+                            timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        ct = resp.headers.get('Content-Type', '')
+        if 'json' in ct:
+            return resp.json()
+        text = resp.text.strip()
+        if text.startswith(('{', '[')):
+            return json.loads(text)
+    except Exception as e:
+        print(f'  [MOPS] {url[:60]}... → {e}')
+    return None
+
+
+def _safe(row: list, idx: int, default: str = '') -> str:
+    try:
+        v = row[idx]
+        return v.strip() if isinstance(v, str) else (str(v) if v is not None else default)
+    except (IndexError, AttributeError):
+        return default
 
 
 # ── ClinicalTrials.gov API ──────────────────────────────────────
@@ -118,8 +146,6 @@ def get_all_monitored_trials() -> dict[str, list[dict]]:
 
 def get_fda_approvals(max_items: int = 10) -> list[dict]:
     """從 FDA RSS 取得最新核准藥物公告"""
-    url = 'https://www.fda.gov/about-fda/contact-fda/rss-feeds-fda'
-    # FDA藥物核准 RSS
     rss_urls = [
         'https://www.fda.gov/rss/drugs-approvals.xml',
         'https://www.fda.gov/rss/drugs-new-drug-approvals.xml',
@@ -138,14 +164,95 @@ def get_fda_approvals(max_items: int = 10) -> list[dict]:
     return results[:max_items]
 
 
+# ── TFDA 台灣食藥署 ────────────────────────────────────────────
+
+def get_tfda_news(max_items: int = 10) -> list[dict]:
+    """從 TFDA 台灣食藥署取得最新藥品查驗/核准動態"""
+    # TFDA 開放資料 RSS / API
+    urls = [
+        'https://www.fda.gov.tw/RSS/news_rss.aspx?nodeID=323',   # 藥品查驗登記
+        'https://www.fda.gov.tw/RSS/news_rss.aspx?nodeID=322',   # 藥物安全快訊
+    ]
+    results = []
+    for url in urls:
+        text = _get(url, timeout=10)
+        if not text or not isinstance(text, str):
+            continue
+        items = _parse_rss(text, max_items)
+        for item in items:
+            item['source'] = 'TFDA'
+        results.extend(items)
+        time.sleep(0.3)
+    return results[:max_items]
+
+
+# ── MOPS 法人說明會（法說會）─────────────────────────────────
+
+def get_investor_conferences(code: str, years_back: int = 2) -> list[dict]:
+    """
+    從 MOPS 取得公司法人說明會（法說會）公告
+    回傳：公告日期、說明會日期、議題、說明方式、附件連結
+
+    法說會是生技股最重要的資訊來源之一：
+    - 管理層親口說明臨床進度、資金狀況、策略調整
+    - 依法義務上傳簡報 PDF（可直接下載）
+    - 有時附有錄影（需至附件或公司IR頁面找）
+    """
+    results = []
+    current_year = datetime.now().year
+
+    for yr in range(current_year, current_year - years_back - 1, -1):
+        roc_year = yr - 1911
+        data = _get_mops('https://mops.twse.com.tw/mops/web/ajax_t100sb01', params={
+            'encodeURIComponent': '1', 'step': '1', 'firstin': '1', 'off': '1',
+            'co_id': code, 'year': str(roc_year), 'TYPEK': 'all', 'pgnum': '1',
+        })
+        if not data or not isinstance(data, dict):
+            time.sleep(0.3)
+            continue
+
+        for row in data.get('data', []):
+            if not isinstance(row, list) or len(row) < 4:
+                continue
+            # MOPS t100sb01 欄位：公告日、公司代號、公司名、說明會日期、方式、議題、附件
+            conf_date = _safe(row, 3) or _safe(row, 2)
+            topic = _safe(row, 5) or _safe(row, 4)
+            material = _safe(row, 6) or ''
+            results.append({
+                'announce_date': _safe(row, 0),
+                'conf_date':     conf_date,
+                'method':        _safe(row, 4),
+                'topic':         topic,
+                'material_url':  material,
+                'source':        'MOPS法說會',
+                'code':          code,
+                'mops_url': f'https://mops.twse.com.tw/mops/web/t100sb01?co_id={code}',
+            })
+        time.sleep(0.3)
+
+    # 依說明會日期降序
+    results.sort(key=lambda x: x.get('conf_date', ''), reverse=True)
+    return results
+
+
+def get_all_investor_conferences() -> dict[str, list[dict]]:
+    """取得所有監控股票的法說會資料"""
+    results = {}
+    for code, info in STOCKS.items():
+        confs = get_investor_conferences(code, years_back=2)
+        results[code] = {'name': info['name'], 'conferences': confs}
+        time.sleep(0.5)
+    return results
+
+
 # ── 國際生技新聞 RSS ───────────────────────────────────────────
 
 _NEWS_SOURCES = [
-    # (名稱, RSS URL, 分類)
-    ('STAT News',      'https://www.statnews.com/feed/',                    '全球生技'),
-    ('BioPharma Dive', 'https://www.biopharmadive.com/feeds/news/',         '全球生技'),
-    ('Reuters Health', 'https://feeds.reuters.com/reuters/healthNews',      '財經/健康'),
-    ('Reuters Biz',    'https://feeds.reuters.com/reuters/businessNews',    '國際財經'),
+    # (名稱, RSS URL, 分類, 可信度)
+    ('STAT News',      'https://www.statnews.com/feed/',                    '全球生技', 'pro'),
+    ('BioPharma Dive', 'https://www.biopharmadive.com/feeds/news/',         '全球生技', 'pro'),
+    ('Reuters Health', 'https://feeds.reuters.com/reuters/healthNews',      '財經/健康', 'gen'),
+    ('Reuters Biz',    'https://feeds.reuters.com/reuters/businessNews',    '國際財經', 'gen'),
 ]
 
 
@@ -155,7 +262,7 @@ def get_intl_news(categories: list[str] = None, max_per_source: int = 5) -> list
     categories: ['全球生技', '國際財經'] 若為 None 則全取
     """
     all_news = []
-    for (source, url, cat) in _NEWS_SOURCES:
+    for (source, url, cat, cred) in _NEWS_SOURCES:
         if categories and cat not in categories:
             continue
         text = _get(url, timeout=10)
@@ -165,10 +272,10 @@ def get_intl_news(categories: list[str] = None, max_per_source: int = 5) -> list
         for item in items:
             item['source'] = source
             item['category'] = cat
+            item['credibility'] = cred  # 'pro'=專業媒體 / 'gen'=一般財經
         all_news.extend(items)
         time.sleep(0.3)
 
-    # 按發佈時間降序排列
     all_news.sort(key=lambda x: x.get('pub_date', ''), reverse=True)
     return all_news
 
@@ -191,7 +298,7 @@ def get_mops_news_all(days_back: int = 7) -> dict[str, list[dict]]:
                 'link':     n.get('url', ''),
                 'pub_date': n.get('date', ''),
                 'summary':  '',
-                'source':   'MOPS',
+                'source':   'MOPS重訊',
                 'code':     n.get('code', code),
             }
             for n in raw
@@ -246,13 +353,10 @@ def _parse_rss(text: str, max_items: int = 10) -> list[dict]:
     """解析 RSS XML，回傳標準化的新聞列表"""
     results = []
     try:
-        # 移除可能造成解析問題的字元
         text = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;)', '&amp;', text)
         root = ET.fromstring(text)
 
-        # 標準 RSS 2.0
         items = root.findall('.//item')
-        # Atom feed
         ns = {'atom': 'http://www.w3.org/2005/Atom'}
         if not items:
             items = root.findall('.//atom:entry', ns)
@@ -267,7 +371,6 @@ def _parse_rss(text: str, max_items: int = 10) -> list[dict]:
             summary = get_text('description') or get_text('atom:summary', ns)
             pub     = get_text('pubDate') or get_text('atom:updated', ns)
 
-            # 清除 HTML 標籤
             summary = re.sub(r'<[^>]+>', '', summary)[:300]
 
             if title:
@@ -287,7 +390,8 @@ def _parse_rss(text: str, max_items: int = 10) -> list[dict]:
 def get_full_news_update() -> dict:
     """
     一次性取得所有新聞來源的最新資訊
-    包含：國際生技/財經新聞、FDA核准、ClinicalTrials更新、台灣重大訊息
+    包含：國際生技/財經新聞、FDA核准、TFDA台灣動態、
+          法人說明會公告、台灣重大訊息、解盲偵測
     """
     print('  抓取國際生技新聞...')
     intl = get_intl_news(max_per_source=5)
@@ -295,14 +399,20 @@ def get_full_news_update() -> dict:
     print('  抓取 FDA 核准公告...')
     fda = get_fda_approvals(max_items=5)
 
+    print('  抓取 TFDA 台灣食藥署動態...')
+    tfda = get_tfda_news(max_items=5)
+
     print('  抓取 MOPS 重大訊息...')
     mops = get_mops_news_all()
 
+    print('  抓取法人說明會（法說會）公告...')
+    investor_conf = get_all_investor_conferences()
+
     # 偵測解盲/臨床關鍵事件
-    all_news = intl + fda
+    all_news = intl + fda + tfda
     flagged = detect_unblinding_keywords(all_news)
 
-    # 整合 MOPS 重大訊息也偵測關鍵字
+    # MOPS 重大訊息也偵測關鍵字
     for code, news_list in mops.items():
         flagged_mops = detect_unblinding_keywords(news_list)
         for item in flagged_mops:
@@ -311,9 +421,12 @@ def get_full_news_update() -> dict:
             flagged.append(item)
 
     return {
-        'intl_news':    intl,
-        'fda_news':     fda,
-        'mops':         mops,
-        'key_events':   flagged,
-        'updated':      datetime.now().strftime('%Y-%m-%d %H:%M'),
+        'intl_news':      intl,
+        'fda_news':       fda,
+        'tfda_news':      tfda,
+        'mops':           mops,
+        'investor_conf':  investor_conf,
+        'key_events':     flagged,
+        'updated':        datetime.now().strftime('%Y-%m-%d %H:%M'),
     }
+

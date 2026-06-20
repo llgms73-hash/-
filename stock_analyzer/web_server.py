@@ -910,20 +910,46 @@ async function tNews(){
   mc(ld("最新生技新聞（首次約30~60秒，需台灣網路）"));
   try{
     var d=await jcached("/api/news");
-    var h=edu("<b>📰 新聞來源說明（可信度由高到低）：</b><br>"
-      +"🔵 <b>官方</b>：FDA.gov、ClinicalTrials.gov — 第一手資料，最可信<br>"
-      +"🟢 <b>專業媒體</b>：STAT News、BioPharma Dive — 有編輯把關的生技專業媒體<br>"
-      +"🟡 <b>財經媒體</b>：Reuters — 廣泛財經，有時生技報導較淺<br>"
-      +"🟠 <b>公司公告</b>：MOPS公開資訊觀測站 — 公司自行揭露，需判斷PR成分<br>"
-      +"<br>⚠️ <b>注意帶風向新聞</b>：公司本質未變但出現負面報導，"
-      +"常見手法：誇大副作用、斷章取義試驗數據、匿名「分析師」唱衰。"
-      +"建議：<b>直接查 ClinicalTrials.gov 官方登錄的試驗狀態</b>（本工具管線頁可見），"
-      +"與官方資料不符的媒體報導要特別存疑。");
-    // 高重要性臨床/解盲事件
+    var h=edu("<b>📰 新聞可信度由高到低：</b><br>"
+      +"🔵 <b>主管機關</b>：FDA（美國）、TFDA（台灣食藥署）、ClinicalTrials.gov — 政府監管，造假違法，最可信<br>"
+      +"🟢 <b>法定公開揭露</b>：MOPS重訊、法說會 — 公司<b>依法義務揭露</b>，說謊是刑事罪，可信度高<br>"
+      +"🟡 <b>專業媒體</b>：STAT News、BioPharma Dive — 有編輯把關，生技圈權威媒體<br>"
+      +"🟠 <b>一般財經媒體</b>：Reuters — 廣泛財經，生技報導深度較淺<br>"
+      +"<br>⚠️ <b>怎麼判斷帶風向？</b>"
+      +"<br>公司臨床本質未變卻出現負面報導，常見手法：誇大副作用、斷章取義數據、匿名「分析師」唱衰。"
+      +"<br>→ 對照本工具「管線頁」的 ClinicalTrials.gov 官方登錄狀態：<b>官方試驗仍在進行 = 媒體唱衰沒根據</b>。");
+    // ── 📅 里程碑進程提醒 ────────────────────────────
+    var h2='';
+    var cat_d=cache["/api/catalyst"]?cache["/api/catalyst"].data:null;
+    if(!cat_d)try{cat_d=await jcached("/api/catalyst");}catch(ex){}
+    if(cat_d){
+      var soon=(cat_d.events||[]).filter(function(e){return e.days_left!==null&&e.days_left>=0&&e.days_left<=60;});
+      soon.sort(function(a,b){return a.days_left-b.days_left;});
+      if(soon.length){
+        h2='<div class="card"><div class="ct">🔔 進程提醒：60天內到期里程碑（避免遺忘）</div>'
+          +edu("這是未來60天內即將發生的重要催化劑事件，可能大幅影響股價。<b>建議每週確認一次是否有最新消息。</b>");
+        soon.forEach(function(e){
+          var urg=e.days_left<=7?"ad":e.days_left<=30?"aw":"ap";
+          h2+='<div class="'+urg+'" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap">'
+            +'<div><b>'+e.name+'('+e.code+')</b><div style="font-size:12px">'+e.description+'</div>'
+            +(e.product?'<div style="font-size:11px;color:#888">'+e.product+'</div>':"")
+            +'</div><div style="font-size:18px;font-weight:700;text-align:right;white-space:nowrap">'
+            +(e.days_left===0?'<span style="color:#e53935">今日！</span>':e.days_left+'天後')
+            +'</div></div>';
+        });
+        h2+="</div>";
+      }else{
+        h2='<div class="card"><div class="ct">🔔 進程提醒</div>'
+          +'<div style="color:#bbb;padding:12px;text-align:center;font-size:13px">近60天內無明確到期催化劑事件<br>'
+          +'<span style="font-size:11px">（不代表沒有，部分事件為模糊日期如「2026-Q3」）</span></div></div>';
+      }
+    }
+    h=h2+h;  // 里程碑提醒放最上面
+    // ── 🚨 重要解盲/臨床事件 ────────────────────────
     var flagged=(d.key_events||[]);
     if(flagged.length){
       h+='<div class="card"><div class="ct">🚨 重要臨床/解盲偵測事件（'+flagged.length+'則）</div>'
-        +edu("自動掃描含「Phase 3 results、FDA approved、解盲、NDA核准」等關鍵字的新聞，高度影響股價。");
+        +edu("自動掃描含「Phase 3 results、FDA approved、解盲、NDA核准」等關鍵字，高度影響股價。");
       flagged.forEach(function(e){
         var cls=e.alert_level==="high"?"ad":"aw";
         var lv=e.alert_level==="high"?"🔴 高重要性":"🟡 中重要性";
@@ -938,38 +964,59 @@ async function tNews(){
       });
       h+="</div>";
     }
-    // 國際生技/財經新聞
-    var intl=(d.intl_news||[]);
-    var srcBadge={"STAT News":"🟢","BioPharma Dive":"🟢","Reuters Health":"🟡","Reuters Biz":"🟡"};
-    if(intl.length){
-      h+='<div class="card"><div class="ct">🌐 國際生技/財經新聞</div>'
-        +edu("英文新聞標題點擊可開啟原文。STAT News 與 BioPharma Dive 是生技圈最受信任的媒體。");
-      intl.slice(0,12).forEach(function(e){
-        var badge=srcBadge[e.source]||"🟡";
+    // ── 🟢 法說會（法人說明會）────────────────────────
+    var iconf=d.investor_conf||{};
+    var confItems=[];
+    stocks.forEach(function(s){
+      var ci=(iconf[s.code]||{}).conferences||[];
+      ci.forEach(function(c){confItems.push(Object.assign({},c,{sname:s.name,scode:s.code}));});
+    });
+    if(confItems.length){
+      h+='<div class="card"><div class="ct">🟢 法人說明會（法說會）紀錄</div>'
+        +edu("<b>法說會是最重要的一手資訊</b>：管理層親口說明臨床進度、資金狀況、策略。"
+          +"<br>📄 依法必須上傳簡報PDF（點「查看附件」下載），有時附有錄影。"
+          +"<br>🎥 <b>找影音</b>：點「MOPS法說會頁」→ 查看附件欄是否有影片連結；或至公司IR官網、YouTube搜尋「公司名稱 法說會」。");
+      confItems.slice(0,8).forEach(function(c){
+        var hasMat=c.material_url&&c.material_url.length>3;
         h+='<div class="ci" style="margin-bottom:8px">'
-          +'<div class="cm"><span style="font-size:12px;font-weight:600">'+badge+' '+(e.source||"")+'</span>'
-          +'<span class="cdt">'+(e.pub_date||"").slice(0,16)+"</span></div>"
-          +'<div style="font-size:13px"><a href="'+(e.link||"#")+'" target="_blank" style="color:#1a237e">'+e.title+"</a></div>"
-          +(e.summary?'<div class="cno" style="font-size:11px">'+e.summary.slice(0,130)+"...</div>":"")
-          +"</div>";
+          +'<div class="cm"><span style="font-size:13px;font-weight:700">🟢 '+c.sname+'('+c.scode+')</span>'
+          +'<span class="cdt">說明會日期：'+(c.conf_date||"")+"</span></div>"
+          +'<div style="font-size:13px;margin:3px 0">'+(c.topic||"（無議題資訊）")+"</div>"
+          +'<div style="font-size:11px;color:#888">方式：'+(c.method||"—")
+          +(c.announce_date?' · 公告日：'+c.announce_date:"")+"</div>"
+          +'<div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">'
+          +(hasMat?'<a href="'+c.material_url+'" target="_blank" style="font-size:12px;background:#e8f5e9;color:#2e7d32;padding:3px 10px;border-radius:12px;text-decoration:none">📄 查看附件/簡報</a>':"")
+          +'<a href="'+c.mops_url+'" target="_blank" style="font-size:12px;background:#e3f2fd;color:#1565c0;padding:3px 10px;border-radius:12px;text-decoration:none">🔗 MOPS法說會頁</a>'
+          +"</div></div>";
       });
       h+="</div>";
+    }else{
+      h+='<div class="card"><div class="ct">🟢 法人說明會（法說會）</div>'
+        +'<div class="edu">⚠️ 法說會資料未能取得（可能是非交易時段或MOPS暫時無回應）。<br>'
+        +'你可直接至 <a href="https://mops.twse.com.tw/mops/web/t100sb01" target="_blank">MOPS法說會專區</a> 輸入股票代號查詢。</div></div>';
     }
-    // FDA核准
-    var fda=(d.fda_news||[]);
-    if(fda.length){
-      h+='<div class="card"><div class="ct">💊 🔵 FDA 最新藥物核准公告</div>'
-        +edu("來源：FDA.gov 官方 RSS，最高可信度。核准=正面利多，確定性極高。");
+    // ── 🔵 FDA / TFDA 核准公告 ────────────────────────
+    var fda=(d.fda_news||[]),tfda=(d.tfda_news||[]);
+    if(fda.length||tfda.length){
+      h+='<div class="card"><div class="ct">🔵 主管機關核准動態</div>'
+        +edu("來源：FDA.gov（美國）+ TFDA（台灣食藥署）官方公告，最高可信度。");
+      tfda.forEach(function(e){
+        h+='<div class="ap" style="margin-bottom:7px">'
+          +'<div class="alb">🔵 台灣TFDA食藥署 · '+(e.pub_date||"").slice(0,16)+"</div>"
+          +'<div><a href="'+(e.link||"#")+'" target="_blank" style="color:#2e7d32;font-weight:600">'+e.title+"</a></div>"
+          +(e.summary?'<div style="font-size:12px;color:#555;margin-top:2px">'+e.summary.slice(0,150)+"</div>":"")
+          +"</div>";
+      });
       fda.forEach(function(e){
         h+='<div class="ap" style="margin-bottom:7px">'
-          +'<div class="alb">🔵 FDA官方 · '+(e.pub_date||"").slice(0,16)+"</div>"
-          +'<div style="font-weight:600"><a href="'+(e.link||"#")+'" target="_blank" style="color:#2e7d32">'+e.title+"</a></div>"
-          +(e.summary?'<div style="font-size:12px;margin-top:3px;color:#555">'+e.summary.slice(0,150)+"...</div>":"")
+          +'<div class="alb">🔵 美國FDA官方 · '+(e.pub_date||"").slice(0,16)+"</div>"
+          +'<div><a href="'+(e.link||"#")+'" target="_blank" style="color:#2e7d32;font-weight:600">'+e.title+"</a></div>"
+          +(e.summary?'<div style="font-size:12px;color:#555;margin-top:2px">'+e.summary.slice(0,150)+"</div>":"")
           +"</div>";
       });
       h+="</div>";
     }
-    // MOPS台灣重大訊息
+    // ── 🟢 MOPS 重大訊息 ────────────────────────────
     var mops=d.mops||{};
     var mopsItems=[];
     stocks.forEach(function(s){
@@ -977,18 +1024,37 @@ async function tNews(){
       items.forEach(function(e){mopsItems.push(Object.assign({},e,{sname:s.name,scode:s.code}));});
     });
     if(mopsItems.length){
-      h+='<div class="card"><div class="ct">📋 🟠 台灣 MOPS 重大訊息（公司公告）</div>'
-        +edu("來源：公開資訊觀測站，公司自行揭露。留意公告中的公關語言，與實際臨床進度對照更準確。");
+      h+='<div class="card"><div class="ct">🟢 MOPS 重大訊息（法定公開揭露）</div>'
+        +edu("公司依法義務揭露，說謊是刑事罪（證券交易法185條）。可信度 > 媒體報導。<br>"
+          +"⚠️ 但留意：公告用字可能充滿公關語言，需配合管線頁的官方試驗資料綜合判斷。");
       mopsItems.slice(0,10).forEach(function(e){
         h+='<div class="ci" style="margin-bottom:6px">'
-          +'<div class="cm"><span style="font-size:12px;font-weight:600">🟠 '+e.sname+"("+e.scode+")</span>"
+          +'<div class="cm"><span style="font-size:12px;font-weight:600">🟢 '+e.sname+'('+e.scode+')</span>'
           +'<span class="cdt">'+(e.pub_date||e.date||"")+"</span></div>"
           +'<div style="font-size:13px">'+(e.title||e.subject||"")+"</div>"
           +"</div>";
       });
       h+="</div>";
     }
-    if(!flagged.length&&!intl.length&&!fda.length&&!mopsItems.length){
+    // ── 🟡 國際專業媒體 ────────────────────────────
+    var intl=(d.intl_news||[]);
+    if(intl.length){
+      var srcBadge={"STAT News":"🟡","BioPharma Dive":"🟡","Reuters Health":"🟠","Reuters Biz":"🟠"};
+      h+='<div class="card"><div class="ct">🟡 國際生技/財經媒體新聞</div>'
+        +edu("STAT News、BioPharma Dive 是專業生技媒體，Reuters 是廣泛財經。"
+          +"<br>讀到不利公司的報導，請先查 ClinicalTrials.gov 的官方試驗狀態再判斷。");
+      intl.slice(0,10).forEach(function(e){
+        var badge=srcBadge[e.source]||"🟠";
+        h+='<div class="ci" style="margin-bottom:8px">'
+          +'<div class="cm"><span style="font-size:12px;font-weight:600">'+badge+' '+(e.source||"")+"</span>"
+          +'<span class="cdt">'+(e.pub_date||"").slice(0,16)+"</span></div>"
+          +'<div style="font-size:13px"><a href="'+(e.link||"#")+'" target="_blank" style="color:#1a237e">'+e.title+"</a></div>"
+          +(e.summary?'<div class="cno" style="font-size:11px">'+e.summary.slice(0,130)+"...</div>":"")
+          +"</div>";
+      });
+      h+="</div>";
+    }
+    if(!flagged.length&&!confItems.length&&!intl.length&&!fda.length&&!tfda.length&&!mopsItems.length){
       h+='<div class="empty">📭 暫無新聞資料<br><span style="font-size:12px;color:#bbb">請確認已連上網路（週一~週五台股時段效果最佳）</span></div>';
     }
     h+='<div style="font-size:11px;color:#bbb;text-align:right;padding:4px">新聞更新時間：'+(d.updated||"未知")+"</div>";
