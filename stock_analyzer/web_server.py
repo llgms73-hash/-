@@ -38,17 +38,28 @@ from valuation import (calc_biotech_valuation, calc_product_npv,
 def _fetch_stock_sync(code: str) -> dict:
     name = STOCKS[code]['name']
     stock_type = STOCKS[code]['type']
-    from fetcher import get_price, get_price_history
-    from chip import full_chip_report
+    from fetcher import get_price, get_price_history, get_institutional_history, get_margin_history
+    from chip import analyze_institutional_from_history, analyze_margin_from_history
     from alerts import check_price_alerts, check_chip_alerts, check_valuation_alerts
-    # Fetch price, history, chip in parallel to reduce latency
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+    DAYS = 10
+    # 4 個 HTTP 批次完全並行，總時間 = 最慢那一個，而非累加
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
         f_price = ex.submit(get_price, code)
-        f_hist  = ex.submit(get_price_history, code, 20)
-        f_chip  = ex.submit(full_chip_report, code, name)
-        price = f_price.result()
+        f_hist  = ex.submit(get_price_history, code, DAYS)
+        f_inst  = ex.submit(get_institutional_history, code, DAYS)
+        f_marg  = ex.submit(get_margin_history, code, DAYS)
+        price      = f_price.result()
         price_hist = f_hist.result()
-        chip = f_chip.result()
+        inst_hist  = f_inst.result()
+        marg_hist  = f_marg.result()
+    # 純計算，無 HTTP 請求
+    inst   = analyze_institutional_from_history(inst_hist, code, name)
+    margin = analyze_margin_from_history(marg_hist, price_hist, code, name)
+    chip = {
+        'code': code, 'name': name,
+        'institutional': inst, 'margin': margin,
+        'all_signals': inst.get('signals', []) + margin.get('signals', []),
+    }
     val = None
     val_alerts = []
     if stock_type == 'biotech':
