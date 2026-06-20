@@ -10,6 +10,7 @@
 import sys
 import os
 import time
+import secrets
 import argparse
 from datetime import datetime
 from typing import Any, Optional
@@ -17,17 +18,18 @@ from typing import Any, Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from fastapi import FastAPI, HTTPException
-    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi import FastAPI, HTTPException, Request, Response, Form
+    from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+    from starlette.middleware.base import BaseHTTPMiddleware
     import uvicorn
 except ImportError:
     print('⚠️  缺少套件，請先執行：')
-    print('    pip install fastapi uvicorn')
+    print('    pip install fastapi uvicorn python-multipart')
     sys.exit(1)
 
 from config import STOCKS, PIPELINE
 from catalyst import get_upcoming_catalysts, MAJOR_CONFERENCES_2026
-from valuation import calc_biotech_valuation, calc_product_npv
+from valuation import calc_biotech_valuation, calc_product_npv, calc_milestone_scenarios
 
 app = FastAPI(title='台灣生技股儀表板')
 
@@ -48,12 +50,106 @@ def _cache_set(key: str, data: Any) -> None:
     _cache[key] = (data, time.time())
 
 
+# ── 登入驗證 ────────────────────────────────────────────────────
+WEB_USERNAME = 'admin'        # 修改帳號
+WEB_PASSWORD = 'biotech2026'  # 修改密碼
+
+_sessions: set = set()
+
+
+class _AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if path in ('/login', '/logout'):
+            return await call_next(request)
+        token = request.cookies.get('session')
+        if token not in _sessions:
+            if path.startswith('/api/'):
+                return JSONResponse({'error': '請先登入', 'redirect': '/login'}, status_code=401)
+            return RedirectResponse('/login', status_code=302)
+        return await call_next(request)
+
+
+app.add_middleware(_AuthMiddleware)
+
+
 def _market_label(m: str) -> str:
     return {'twse': '上市', 'otc': '上櫃', 'innovation': '創新板',
             'emerging': '興櫃'}.get(m, m)
 
 
+# ── 登入頁面 HTML ───────────────────────────────────────────────
+_LOGIN_HTML = '''<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>登入 - 台灣生技股儀表板</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,"微軟正黑體","Noto Sans TC",sans-serif;
+     background:linear-gradient(135deg,#1a237e,#3949ab);min-height:100vh;
+     display:flex;align-items:center;justify-content:center;}
+.box{background:#fff;border-radius:16px;padding:36px 32px;width:320px;
+     box-shadow:0 8px 32px rgba(0,0,0,.3);}
+.logo{text-align:center;font-size:22px;font-weight:700;color:#1a237e;margin-bottom:4px;}
+.sub{text-align:center;font-size:12px;color:#888;margin-bottom:28px;}
+input{display:block;width:100%;padding:12px 14px;border:2px solid #e0e0e0;
+      border-radius:8px;font-size:15px;margin-bottom:14px;outline:none;
+      transition:border-color .15s;font-family:inherit;}
+input:focus{border-color:#1a237e;}
+button{width:100%;padding:13px;background:#1a237e;color:#fff;border:none;
+       border-radius:8px;font-size:16px;font-weight:700;cursor:pointer;letter-spacing:3px;}
+button:active{background:#0d1b6e;}
+.errmsg{display:none;background:#ffebee;border:1px solid #ef9a9a;border-radius:6px;
+        padding:9px 12px;font-size:13px;color:#c62828;margin-bottom:14px;text-align:center;}
+</style>
+</head>
+<body>
+<div class="box">
+  <div class="logo">🔬 台灣生技股儀表板</div>
+  <div class="sub">請登入以繼續使用</div>
+  <div class="errmsg" id="errmsg">❌ 帳號或密碼錯誤，請重試</div>
+  <form method="post" action="/login">
+    <input type="text" name="username" placeholder="帳號" autocomplete="username" autofocus>
+    <input type="password" name="password" placeholder="密碼" autocomplete="current-password">
+    <button type="submit">登 入</button>
+  </form>
+</div>
+</body>
+</html>'''
+
+
 # ── API 端點 ────────────────────────────────────────────────
+
+@app.get('/login', response_class=HTMLResponse)
+async def login_page(request: Request):
+    if request.cookies.get('session') in _sessions:
+        return RedirectResponse('/', status_code=302)
+    return HTMLResponse(content=_LOGIN_HTML)
+
+
+@app.post('/login')
+async def login_post(username: str = Form(...), password: str = Form(...)):
+    if username.strip() == WEB_USERNAME and password == WEB_PASSWORD:
+        token = secrets.token_urlsafe(32)
+        _sessions.add(token)
+        r = RedirectResponse(url='/', status_code=303)
+        r.set_cookie('session', token, httponly=True, samesite='strict', max_age=86400 * 7)
+        return r
+    return HTMLResponse(content=_LOGIN_HTML.replace(
+        'id="errmsg"', 'id="errmsg" style="display:block"'), status_code=401)
+
+
+@app.get('/logout')
+async def logout(request: Request):
+    token = request.cookies.get('session')
+    if token:
+        _sessions.discard(token)
+    r = RedirectResponse(url='/login', status_code=303)
+    r.delete_cookie('session')
+    return r
+
 
 @app.get('/', response_class=HTMLResponse)
 async def index():
@@ -173,6 +269,114 @@ async def api_pipeline(code: str):
     }
 
 
+@app.get('/api/milestones/{code}')
+async def api_milestones(code: str, price: float = 0.0):
+    """里程碑市值推估（純本地計算，不需網路）"""
+    if code not in STOCKS:
+        raise HTTPException(404, f'股票代號 {code} 不在監控清單')
+    return calc_milestone_scenarios(code, STOCKS[code]['name'], share_price=price)
+
+
+@app.get('/api/search/{code}')
+async def api_search(code: str):
+    """
+    搜尋任意台股（不限於4支監控清單）
+    回傳：股價、三大法人、融資融券、示警
+    若為監控清單內生技股，額外回傳：估值 + 里程碑市值
+    """
+    code = code.strip().upper()
+    cached = _cache_get(f'search_{code}')
+    if cached:
+        return cached
+
+    in_watch = code in STOCKS
+    name = STOCKS.get(code, {}).get('name', f'股票 {code}')
+    stock_type = STOCKS.get(code, {}).get('type', 'general')
+
+    try:
+        from fetcher import get_price, get_price_history
+        from chip import full_chip_report
+        from alerts import check_price_alerts, check_chip_alerts
+
+        price = get_price(code)
+        if not price:
+            return JSONResponse(status_code=404, content={
+                'error': f'找不到股票 {code} 的資料',
+                'hint': '確認代號正確（4位數字）且今天是交易日（週一~週五）、電腦連上台灣網路',
+                'code': code,
+            })
+
+        price_hist = get_price_history(code, 20)
+        chip = full_chip_report(code, name)
+        alerts = check_price_alerts(code, name, price_hist) + check_chip_alerts(chip)
+
+        result: dict = {
+            'code': code,
+            'name': name,
+            'in_watchlist': in_watch,
+            'type': stock_type,
+            'price': price,
+            'chip': chip,
+            'alerts': alerts,
+            'updated': datetime.now().strftime('%Y-%m-%d %H:%M'),
+        }
+
+        # 監控清單內生技股 → 額外估值 + 里程碑
+        if in_watch and stock_type == 'biotech':
+            from alerts import check_valuation_alerts
+            share_price = price.get('close', 0) if price else 0
+            val = calc_biotech_valuation(code, name, share_price=share_price)
+            val_alerts = check_valuation_alerts(code, name, val)
+            result['valuation'] = val
+            result['alerts'] += val_alerts
+            result['milestones'] = calc_milestone_scenarios(code, name, share_price)
+
+        _cache_set(f'search_{code}', result)
+        return result
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={
+            'error': str(e), 'code': code, 'name': name,
+            'hint': '確認電腦已連上台灣網路，且今天是交易日（週一~週五）',
+        })
+
+
+@app.get('/api/news')
+async def api_news():
+    """
+    取得所有最新新聞（國際生技/財經 + FDA核准 + 台灣重大訊息 + 解盲偵測）
+    首次執行約 30~60 秒（網路抓取），之後 30 分鐘快取
+    """
+    cached = _cache_get('news')
+    if cached:
+        return cached
+    try:
+        from news_fetcher import get_full_news_update
+        result = get_full_news_update()
+        _cache_set('news', result)
+        return result
+    except Exception as e:
+        return JSONResponse(status_code=500, content={'error': str(e)})
+
+
+@app.get('/api/trials/{code}')
+async def api_trials(code: str):
+    """從 ClinicalTrials.gov 查詢單一公司臨床試驗（即時查詢）"""
+    cached = _cache_get(f'trials_{code}')
+    if cached:
+        return cached
+    try:
+        from news_fetcher import get_ct_trials
+        name = STOCKS.get(code, {}).get('name', f'股票{code}')
+        trials = get_ct_trials(company=name, max_results=10)
+        result = {'code': code, 'name': name, 'trials': trials,
+                  'updated': datetime.now().strftime('%Y-%m-%d %H:%M')}
+        _cache_set(f'trials_{code}', result)
+        return result
+    except Exception as e:
+        return JSONResponse(status_code=500, content={'error': str(e)})
+
+
 # ── 網頁 HTML（行動裝置友善）──────────────────────────────────
 
 _HTML = '''<!DOCTYPE html>
@@ -256,7 +460,10 @@ td{padding:7px 6px;border-bottom:1px solid #f0f0f0;vertical-align:middle;}
 </style>
 </head>
 <body>
-<div class="hdr">
+<div class="hdr" style="position:relative">
+  <a href="/logout" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);
+     color:rgba(255,255,255,.75);font-size:12px;text-decoration:none;
+     background:rgba(255,255,255,.15);padding:4px 12px;border-radius:12px;">登出</a>
   <h1>🔬 台灣生技股儀表板</h1>
   <p>漢康-KY(7827)&nbsp;·&nbsp;康霈(6919)&nbsp;·&nbsp;泰合(6467)&nbsp;·&nbsp;竟天(6917)</p>
 </div>
@@ -267,6 +474,8 @@ td{padding:7px 6px;border-bottom:1px solid #f0f0f0;vertical-align:middle;}
   <div class="tab"     data-t="val"  onclick="sw(this)">💰 估值</div>
   <div class="tab"     data-t="ale"  onclick="sw(this)">⚡ 示警</div>
   <div class="tab"     data-t="pip"  onclick="sw(this)">🧬 管線</div>
+  <div class="tab"     data-t="srch" onclick="sw(this)">🔍 查任何股</div>
+  <div class="tab"     data-t="news" onclick="sw(this)">📰 新聞</div>
 </div>
 <div class="wrap" id="mc">
   <div class="loading"><div class="sp"></div><p>載入中...</p></div>
@@ -302,7 +511,7 @@ function sw(el){
   el.classList.add("on");rt();
 }
 function rt(){
-  ({cat:tCat,chip:tChip,val:tVal,ale:tAle,pip:tPip})[tab]();
+  ({cat:tCat,chip:tChip,val:tVal,ale:tAle,pip:tPip,srch:tSearch,news:tNews})[tab]();
 }
 
 /* ── 催化劑 ── */
@@ -403,10 +612,12 @@ async function tVal(){
     var d=await jcached("/api/stock/"+sel);
     if(d.error){mc(nerr(d.error,d.hint));return;}
     var val=d.valuation,price=d.price;
-    var h=edu("<b>生技股為何不用本益比(P/E)？</b>"
-      +"<br>本益比=股價÷每股獲利。但生技股<b>還沒賺錢</b>，所以P/E無法計算。"
-      +"<br>改用 <b>rNPV法</b>=未來可能賺多少×成功機率×時間折現，是業界標準估值法。"
-      +"<br>⚠️ 市場情緒往往遠高於rNPV（炒夢），也可能遠低於（恐慌拋售），請謹慎判斷。");
+    var curPrice=price?(price.close||0):0;
+    var h=edu("<b>生技股估值 vs 一般股票估值的差別</b>"
+      +"<br>一般股票用「本益比(P/E)=股價÷每股獲利」，但生技股<b>還沒賺錢</b>，無法計算。"
+      +"<br>生技股改用 <b>rNPV法</b>：未來可能賺多少 × 成功機率 × 時間折現 = 理論價值。"
+      +"<br>市場通常給予 rNPV 2~8倍的「溢價」（期待值），Phase越早倍數越高。"
+      +"<br>⚠️ 市場情緒可能遠高或遠低於計算值，這是工具，不是保證。");
     if(price){
       var chg=price.change||0,cls=chg>0?"up":chg<0?"dn":"fl";
       h+='<div class="card"><div class="ct">📈 最新股價</div>'
@@ -420,14 +631,14 @@ async function tVal(){
         +'<div style="font-size:11px;color:#888;margin-top:6px">資料日期：'+(price.date||"")+" · 來源："+(price.source||"")+"</div>"
         +"</div>";
     }else{
-      h+='<div class="card"><p style="color:#999">⚠️ 股價資料無法取得（非交易日或網路問題）</p></div>';
+      h+='<div class="card"><p style="color:#999">⚠️ 股價資料無法取得（非交易日）</p></div>';
     }
     if(val&&!val.status){
       var prods=val.pipeline_products||[];
-      h+='<div class="card"><div class="ct">💊 Pipeline rNPV 估值</div>'
-        +"<table><tr><th>產品</th><th>階段</th><th>成功率</th><th>rNPV(億台幣)</th></tr>"
+      h+='<div class="card"><div class="ct">💊 Pipeline rNPV 估值明細</div>'
+        +"<table><tr><th>產品</th><th>階段</th><th>最終成功率</th><th>rNPV(億台幣)</th></tr>"
         +prods.map(function(p){
-          return"<tr><td style='font-size:12px'>"+p.name+"</td>"
+          return"<tr><td style='font-size:11px'>"+p.name+"</td>"
             +"<td>"+pb(p.phase)+"</td>"
             +"<td>"+(p.prob_success*100).toFixed(0)+"%</td>"
             +"<td style='font-weight:600'>"+(p.rnpv_twd_mn/100).toFixed(1)+"</td></tr>";
@@ -435,7 +646,8 @@ async function tVal(){
         +'<tr class="npvt"><td colspan="3">Pipeline 合計</td>'
         +"<td>"+((val.total_pipeline_twd_mn||0)/100).toFixed(1)+" 億台幣</td></tr>"
         +"</table>"
-        +(val.valuation_note?'<div class="edu" style="margin-top:8px">📌 '+val.valuation_note+"</div>":"")
+        +edu("📖 <b>成功率</b>是「從現在這個Phase到最終上市並產生收益的歷史機率」，不是本步驟成功率。<br>"
+          +"rNPV = 峰值銷售 × 授權金率 × 4倍收益乘數 × 成功率 ÷ 折現")
         +"</div>";
       if(val.cash_runway_months){
         var rw=val.cash_runway_months,ri=rw<12?"🔴":rw<18?"⚠️":"✅";
@@ -443,15 +655,73 @@ async function tVal(){
           +'<div style="font-size:12px;color:#888;margin-top:4px">現金不夠就要再募資（稀釋股本），跑道越短風險越高。</div>'
           +"</div>";
       }else{
-        h+='<div class="card" style="font-size:13px;color:#888">ℹ️ 現金跑道資料需手動更新財報（'
-          +"config.py 填入 cash_twd_mn 和 burn_rate_twd_mn）。"
-          +"<br>提醒：生技股現金跑道非常重要，建議每季查閱財報！</div>";
+        h+='<div class="card" style="font-size:13px;color:#999">ℹ️ 現金跑道需更新財報資料（config.py填入cash_twd_mn + burn_rate_twd_mn）。建議每季查看！</div>';
       }
     }else if(val&&val.status){
       h+='<div class="card"><p>⚠️ '+val.status+"</p></div>";
     }
+    // 里程碑市值對照表（本地計算，不需網路，快速）
+    try{
+      var ms=await jget("/api/milestones/"+sel+(curPrice?"?price="+curPrice:""));
+      h+=rMilestone(ms);
+    }catch(ex){}
     mc(h);
   }catch(e){mc(err(e.message));}
+}
+
+/* ── 里程碑市值對照表渲染 ── */
+function rMilestone(ms){
+  if(ms.error)return'<div class="card" style="color:#999">ℹ️ 里程碑資料：'+ms.error+"</div>";
+  var h='<div class="card"><div class="ct">📊 里程碑達標市值對照表</div>'
+    +edu("<b>怎麼使用這張表？</b><br>"
+      +"• <b>現況合理市值</b>：rNPV × 市場溢價倍數（"+ms.base_premium[0]+"~"+ms.base_premium[1]+"x），"
+        +"代表「現在這個進度下市場應給的理論市值」<br>"
+      +"• <b>每一情境</b>：若該里程碑達標，rNPV重新計算（成功率↑、距上市年數↓），市值重評<br>"
+      +"• <b>本步成功率</b>：這個Phase轉換的歷史平均機率（Phase2→3只有37%，最難）<br>"
+      +"• <b>增幅</b>：達標後合理市值比現況增加多少億（因溢價倍數同步調整，可能不如直覺大）<br>"
+      +"💡 看法：增幅大＋本步成功率高 = 最優質催化劑");
+  // 現況列
+  h+="<div style='overflow-x:auto'><table style='font-size:12px;min-width:500px'>"
+    +"<tr><th>情境</th><th style='max-width:130px'>產品</th><th>合計rNPV</th><th>合理市值區間<br>(億台幣)</th><th>本步<br>成功率</th><th>較現況<br>增幅(億)</th></tr>"
+    +"<tr style='background:#e3f2fd;font-weight:700'>"
+    +"<td>📍 現況</td><td>—</td>"
+    +"<td>"+ms.current_rnpv_bn+"億</td>"
+    +"<td style='color:#1565c0'>"+ms.base_mkt_cap_low_bn+"~"+ms.base_mkt_cap_high_bn+"</td>"
+    +"<td>—</td><td style='color:#888'>基準</td></tr>";
+  var phase_icons={"Phase1":"🧪","Phase2":"🔬","Phase3":"🏥","NDA/BLA":"📋","Approved":"✅"};
+  (ms.scenarios||[]).forEach(function(s){
+    var icon=phase_icons[s.to_phase]||"🎯";
+    var upOk=s.uplift_low_bn>0||s.uplift_high_bn>0;
+    var upStr=(s.uplift_low_bn>=0?"+":"")+s.uplift_low_bn+"~"+(s.uplift_high_bn>=0?"+":"")+s.uplift_high_bn;
+    var pname=s.product.length>16?s.product.slice(0,16)+"…":s.product;
+    h+="<tr>"
+      +"<td>"+icon+" "+s.from_phase+"<br>→"+s.to_phase+"</td>"
+      +"<td style='font-size:11px;color:#555'>"+pname+"</td>"
+      +"<td>"+s.new_rnpv_bn+"億</td>"
+      +"<td style='font-weight:700;color:#1a237e'>"+s.mkt_cap_low_bn+"~"+s.mkt_cap_high_bn+"</td>"
+      +"<td style='color:#888'>"+s.step_prob_pct+"%</td>"
+      +'<td class="'+(upOk?"up":"dn")+'">'+upStr+"</td>"
+      +"</tr>";
+  });
+  h+="</table></div>";
+  // 現在市值 vs 合理市值（若有股本）
+  if(ms.curr_mkt_cap_bn){
+    var pf=ms.premium_vs_fair,pfcls=pf>30?"up":pf<-30?"dn":"fl";
+    h+='<div style="margin-top:10px;padding:10px;background:#fafafa;border-radius:6px;font-size:13px">'
+      +"<b>現在市值："+ms.curr_mkt_cap_bn+"億</b>"
+      +"  vs  合理市值 "+ms.base_mkt_cap_low_bn+"~"+ms.base_mkt_cap_high_bn+"億"
+      +'<span class="'+pfcls+'" style="margin-left:8px">'+(pf>=0?"溢價 +":"折價 ")+Math.abs(pf)+"%</span>"
+      +(ms.fair_price_low?'<div style="font-size:12px;color:#888;margin-top:3px">合理股價估算：'+ms.fair_price_low+"~"+ms.fair_price_high+" 元</div>":"")
+      +"</div>";
+  }else{
+    h+='<div class="edu" style="margin-top:8px;font-size:11px">ℹ️ <b>想看「現在股價貴不貴」？</b>'
+      +'填入 config.py 的 shares_mn（流通股數，百萬股）即可自動計算。'
+      +'查詢來源：公開資訊觀測站(mops.twse.com.tw)→財務分析→每股參考資訊，或看季報封面「普通股股數」。'
+      +"</div>";
+  }
+  h+='<div style="font-size:10px;color:#bbb;margin-top:8px">📌 '+ms.premium_note+"</div>"
+    +"</div>";
+  return h;
 }
 
 /* ── 示警 ── */
@@ -552,6 +822,179 @@ async function jcached(url){
 async function jget(url){
   var r=await fetch(url);if(!r.ok)throw new Error("HTTP "+r.status);return r.json();
 }
+
+/* ── 查詢任意股票 ── */
+function tSearch(){
+  mc('<div class="card"><div class="ct">🔍 查詢任意台股</div>'
+    +edu("不限於監控清單，只需輸入4位股票代號即可查詢任何台灣上市/上櫃股票。"
+      +"<br>可查：股價行情、三大法人籌碼、融資融券、示警。"
+      +"<br>若是監控清單內的生技股，還會顯示 rNPV 估值和里程碑市值推估。")
+    +'<div style="display:flex;gap:8px;margin-bottom:4px">'
+    +'<input id="si" type="text" maxlength="6" placeholder="輸入代號，例如 2330" '
+    +'style="flex:1;padding:10px 12px;border:2px solid #c5cae9;border-radius:8px;font-size:16px;outline:none"'
+    +' onkeypress="if(event.key===\'Enter\')dSearch()">'
+    +'<button onclick="dSearch()" style="background:#1a237e;color:white;border:none;'
+    +'padding:10px 20px;border-radius:8px;font-size:15px;cursor:pointer;white-space:nowrap">查 詢</button>'
+    +'</div>'
+    +'<div style="font-size:11px;color:#aaa;margin-bottom:10px">⚠️ 需電腦連上台灣網路才能取得即時資料（週一~週五）</div>'
+    +'<div id="sr"></div>'
+    +'</div>');
+}
+
+async function dSearch(){
+  var c=(document.getElementById("si")||{}).value||"";
+  c=c.trim().toUpperCase();
+  if(!c){return;}
+  var sr=document.getElementById("sr");
+  if(!sr)return;
+  sr.innerHTML=ld("股票 "+c+" 資料（約10~30秒）");
+  try{
+    var d=await jget("/api/search/"+c);
+    if(d.error){sr.innerHTML=nerr(d.error,d.hint);return;}
+    var h="";
+    var price=d.price,chg=price?(price.change||0):0;
+    var cls=chg>0?"up":chg<0?"dn":"fl";
+    // 股票標題
+    h+='<div class="card" style="display:flex;justify-content:space-between;align-items:center">'
+      +'<div><div style="font-size:20px;font-weight:700;color:#1a237e">'+d.code+'</div>'
+      +'<div style="font-size:14px;color:#555">'+d.name+'</div>'
+      +'<span class="badge '+(d.in_watchlist?"bb":"bg")+'">'+(d.in_watchlist?"🔬 監控清單":"📊 一般股票")+'</span>'
+      +'</div>'
+      +(price?'<div style="text-align:right"><div class="pb '+cls+'" style="font-size:28px">'+price.close+'</div>'
+        +'<div class="'+cls+'" style="font-size:13px">'+(chg>0?"▲ +":chg<0?"▼ ":"─ ")+Math.abs(chg).toFixed(2)+" 元</div>"
+        +'<div style="font-size:11px;color:#888">'+(price.date||"")+"</div></div>":"")
+      +"</div>";
+    // 三大法人
+    var inst=(d.chip||{}).institutional||{};
+    if(!inst.error){
+      h+='<div class="card"><div class="ct">🏦 三大法人籌碼</div>'
+        +"<table><tr><th>法人</th><th>今日淨買賣(張)</th><th>方向</th><th>連續天數</th><th>累計(張)</th></tr>"
+        +["foreign","trust","dealer","total"].map(function(k){
+          var lb={foreign:"外資",trust:"投信",dealer:"自營",total:"合計"}[k];
+          var di=inst[k]||{},net=di.latest_net||0,cum=di.cumsum||0;
+          return'<tr'+(k==="total"?' style="font-weight:700"':"")+">"
+            +"<td>"+lb+"</td>"
+            +'<td class="'+(net>0?"up":net<0?"dn":"")+'">'+fs(net)+"</td>"
+            +"<td>"+(di.direction==="買超"?"📈 買":"📉 賣")+"</td>"
+            +"<td>"+(di.consecutive||0)+"天</td>"
+            +'<td class="'+(cum>0?"up":cum<0?"dn":"")+'">'+fs(cum)+"</td></tr>";
+        }).join("")+"</table>"
+        +(inst.signals||[]).map(function(s){return'<div style="margin-top:5px;font-size:13px">'+s+"</div>";}).join("")
+        +"</div>";
+    }else{
+      h+='<div class="card"><p style="color:#999">⚠️ 籌碼資料暫時無法取得</p></div>';
+    }
+    // 示警
+    if(d.alerts&&d.alerts.length){
+      h+='<div class="card"><div class="ct">⚡ 示警</div>'
+        +d.alerts.map(function(a){
+          var c=a.level==="🔴"?"ad":a.level==="⚠️"?"aw":"ap";
+          return'<div class="'+c+'">'+a.level+" "+a.msg+"</div>";
+        }).join("")+"</div>";
+    }
+    // 估值（監控清單生技股才有）
+    if(d.milestones){
+      h+=rMilestone(d.milestones);
+    }else if(!d.in_watchlist){
+      h+='<div class="edu">ℹ️ 此股票不在監控清單，不顯示估值。'
+        +'如需加入監控，請在 config.py 的 STOCKS 增加此代號。'
+        +'<br>一般股票估值（本益比/EV/EBITDA）的自動計算功能後續版本將加入。</div>';
+    }
+    sr.innerHTML=h;
+  }catch(e){
+    if(document.getElementById("sr"))document.getElementById("sr").innerHTML=err(e.message);
+  }
+}
+/* ── 新聞 ── */
+async function tNews(){
+  mc(ld("最新生技新聞（首次約30~60秒，需台灣網路）"));
+  try{
+    var d=await jcached("/api/news");
+    var h=edu("<b>📰 新聞來源說明（可信度由高到低）：</b><br>"
+      +"🔵 <b>官方</b>：FDA.gov、ClinicalTrials.gov — 第一手資料，最可信<br>"
+      +"🟢 <b>專業媒體</b>：STAT News、BioPharma Dive — 有編輯把關的生技專業媒體<br>"
+      +"🟡 <b>財經媒體</b>：Reuters — 廣泛財經，有時生技報導較淺<br>"
+      +"🟠 <b>公司公告</b>：MOPS公開資訊觀測站 — 公司自行揭露，需判斷PR成分<br>"
+      +"<br>⚠️ <b>注意帶風向新聞</b>：公司本質未變但出現負面報導，"
+      +"常見手法：誇大副作用、斷章取義試驗數據、匿名「分析師」唱衰。"
+      +"建議：<b>直接查 ClinicalTrials.gov 官方登錄的試驗狀態</b>（本工具管線頁可見），"
+      +"與官方資料不符的媒體報導要特別存疑。");
+    // 高重要性臨床/解盲事件
+    var flagged=(d.key_events||[]);
+    if(flagged.length){
+      h+='<div class="card"><div class="ct">🚨 重要臨床/解盲偵測事件（'+flagged.length+'則）</div>'
+        +edu("自動掃描含「Phase 3 results、FDA approved、解盲、NDA核准」等關鍵字的新聞，高度影響股價。");
+      flagged.forEach(function(e){
+        var cls=e.alert_level==="high"?"ad":"aw";
+        var lv=e.alert_level==="high"?"🔴 高重要性":"🟡 中重要性";
+        var src=e.source||e.name||e.code||"";
+        var ttl=e.title||e.subject||"（無標題）";
+        var lnk=e.link||e.url||"#";
+        h+='<div class="'+cls+'" style="margin-bottom:8px">'
+          +'<div class="alb">'+lv+' · '+src+' · '+(e.pub_date||e.date||"").slice(0,16)+"</div>"
+          +'<div style="font-weight:600"><a href="'+lnk+'" target="_blank" style="color:inherit">'+ttl+"</a></div>"
+          +(e.summary?'<div style="font-size:12px;margin-top:3px;opacity:.85">'+e.summary.slice(0,160)+"...</div>":"")
+          +"</div>";
+      });
+      h+="</div>";
+    }
+    // 國際生技/財經新聞
+    var intl=(d.intl_news||[]);
+    var srcBadge={"STAT News":"🟢","BioPharma Dive":"🟢","Reuters Health":"🟡","Reuters Biz":"🟡"};
+    if(intl.length){
+      h+='<div class="card"><div class="ct">🌐 國際生技/財經新聞</div>'
+        +edu("英文新聞標題點擊可開啟原文。STAT News 與 BioPharma Dive 是生技圈最受信任的媒體。");
+      intl.slice(0,12).forEach(function(e){
+        var badge=srcBadge[e.source]||"🟡";
+        h+='<div class="ci" style="margin-bottom:8px">'
+          +'<div class="cm"><span style="font-size:12px;font-weight:600">'+badge+' '+(e.source||"")+'</span>'
+          +'<span class="cdt">'+(e.pub_date||"").slice(0,16)+"</span></div>"
+          +'<div style="font-size:13px"><a href="'+(e.link||"#")+'" target="_blank" style="color:#1a237e">'+e.title+"</a></div>"
+          +(e.summary?'<div class="cno" style="font-size:11px">'+e.summary.slice(0,130)+"...</div>":"")
+          +"</div>";
+      });
+      h+="</div>";
+    }
+    // FDA核准
+    var fda=(d.fda_news||[]);
+    if(fda.length){
+      h+='<div class="card"><div class="ct">💊 🔵 FDA 最新藥物核准公告</div>'
+        +edu("來源：FDA.gov 官方 RSS，最高可信度。核准=正面利多，確定性極高。");
+      fda.forEach(function(e){
+        h+='<div class="ap" style="margin-bottom:7px">'
+          +'<div class="alb">🔵 FDA官方 · '+(e.pub_date||"").slice(0,16)+"</div>"
+          +'<div style="font-weight:600"><a href="'+(e.link||"#")+'" target="_blank" style="color:#2e7d32">'+e.title+"</a></div>"
+          +(e.summary?'<div style="font-size:12px;margin-top:3px;color:#555">'+e.summary.slice(0,150)+"...</div>":"")
+          +"</div>";
+      });
+      h+="</div>";
+    }
+    // MOPS台灣重大訊息
+    var mops=d.mops||{};
+    var mopsItems=[];
+    stocks.forEach(function(s){
+      var items=mops[s.code]||[];
+      items.forEach(function(e){mopsItems.push(Object.assign({},e,{sname:s.name,scode:s.code}));});
+    });
+    if(mopsItems.length){
+      h+='<div class="card"><div class="ct">📋 🟠 台灣 MOPS 重大訊息（公司公告）</div>'
+        +edu("來源：公開資訊觀測站，公司自行揭露。留意公告中的公關語言，與實際臨床進度對照更準確。");
+      mopsItems.slice(0,10).forEach(function(e){
+        h+='<div class="ci" style="margin-bottom:6px">'
+          +'<div class="cm"><span style="font-size:12px;font-weight:600">🟠 '+e.sname+"("+e.scode+")</span>"
+          +'<span class="cdt">'+(e.pub_date||e.date||"")+"</span></div>"
+          +'<div style="font-size:13px">'+(e.title||e.subject||"")+"</div>"
+          +"</div>";
+      });
+      h+="</div>";
+    }
+    if(!flagged.length&&!intl.length&&!fda.length&&!mopsItems.length){
+      h+='<div class="empty">📭 暫無新聞資料<br><span style="font-size:12px;color:#bbb">請確認已連上網路（週一~週五台股時段效果最佳）</span></div>';
+    }
+    h+='<div style="font-size:11px;color:#bbb;text-align:right;padding:4px">新聞更新時間：'+(d.updated||"未知")+"</div>";
+    mc(h);
+  }catch(e){mc(err("新聞抓取失敗："+e.message+"<br><small style='color:#888'>請確認已連上台灣網路，或稍候重試</small>"));}
+}
 init();
 </script>
 </body>
@@ -580,11 +1023,14 @@ def main():
         print()
         print('  提示：想讓手機連線請改用：python web_server.py --mobile')
     print()
+    print(f'  🔐 帳號：{WEB_USERNAME}  密碼：{WEB_PASSWORD}')
+    print()
     print('  ✅ 催化劑日曆（快速）')
     print('  ✅ 三大法人籌碼 / 融資融券（需台灣IP）')
     print('  ✅ rNPV估值分析（本地計算，快速）')
     print('  ✅ 示警系統')
     print('  ✅ 研發管線總覽')
+    print('  ✅ 新聞追蹤（國際生技/FDA/解盲偵測）')
     print()
     print('  按 Ctrl+C 停止')
     print('=' * 56)
