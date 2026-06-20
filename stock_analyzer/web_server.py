@@ -78,7 +78,7 @@ _sessions: set = set()
 class _AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        if path in ('/login', '/logout', '/api/health'):
+        if path in ('/login', '/logout', '/api/health', '/js/app.js'):
             return await call_next(request)
         token = request.cookies.get('session')
         if not (token in _sessions or _valid_token(token or '')):
@@ -556,8 +556,11 @@ td{padding:7px 6px;border-bottom:1px solid #f0f0f0;vertical-align:middle;}
   <div class="loading"><div class="sp"></div><p>載入中...</p></div>
 </div>
 <noscript><div style="text-align:center;padding:40px;color:red">⚠️ 請啟用 JavaScript 才能使用本頁面</div></noscript>
-<script>
-/* 立即執行：確認 JS 有載入，同時顯示連線中狀態 */
+<script src="/js/app.js"></script>
+</body>
+</html>'''
+
+_JS_CODE = """
 (function(){
   var e=document.getElementById('mc');
   if(e)e.innerHTML='<div class="loading"><div class="sp"></div><p>連線中，首次載入約5~15秒...</p></div>';
@@ -1290,12 +1293,13 @@ async function tNews(){
   }catch(e){mc(err("新聞抓取失敗："+e.message+"<br><small style='color:#888'>請確認已連上台灣網路，或稍候重試</small>"));}
 }
 init();
-</script>
-</body>
-</html>'''
+"""
 
 
-# ── 主程式 ───────────────────────────────────────────────────
+@app.get('/js/app.js')
+async def serve_js():
+    from fastapi.responses import Response
+    return Response(content=_JS_CODE, media_type='application/javascript; charset=utf-8')
 
 def main():
     parser = argparse.ArgumentParser(description='生技股分析網頁伺服器')
