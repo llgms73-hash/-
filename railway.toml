@@ -3,6 +3,4 @@ builder = "nixpacks"
 
 [deploy]
 startCommand = "uvicorn stock_analyzer.web_server:app --host 0.0.0.0 --port $PORT"
-healthcheckPath = "/login"
-healthcheckTimeout = 300
 restartPolicyType = "on_failure"
