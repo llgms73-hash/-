@@ -553,12 +553,27 @@ td{padding:7px 6px;border-bottom:1px solid #f0f0f0;vertical-align:middle;}
   <div class="tab"     data-t="news" onclick="sw(this)">📰 新聞</div>
 </div>
 <div class="wrap" id="mc">
-  <div class="loading"><div class="sp"></div><p>初始化中...</p></div>
+  <div class="loading"><div class="sp"></div><p>載入中...</p></div>
 </div>
+<noscript><div style="text-align:center;padding:40px;color:red">⚠️ 請啟用 JavaScript 才能使用本頁面</div></noscript>
 <script>
+/* 立即執行：確認 JS 有載入，同時顯示連線中狀態 */
+(function(){
+  var e=document.getElementById('mc');
+  if(e)e.innerHTML='<div class="loading"><div class="sp"></div><p>連線中，首次載入約5~15秒...</p></div>';
+})();
 var stocks=[],sel=null,tab="cat",cache={};
-window.onerror=function(msg,src,line){mc('<div class="card" style="color:#c62828">JS錯誤：'+msg+' ('+line+')</div>');return false;};
-window.onunhandledrejection=function(ev){mc('<div class="card" style="color:#c62828">非同步錯誤：'+(ev.reason&&ev.reason.message||ev.reason)+'</div>');};
+window.onerror=function(msg,src,ln){
+  var e=document.getElementById('mc');
+  if(e)e.innerHTML='<div class="card" style="color:#c62828;padding:16px">⚠️ JS錯誤：'+msg+' (行'+ln+')<br><button onclick="location.reload()" style="margin-top:8px;padding:6px 16px;background:#1a237e;color:#fff;border:none;border-radius:6px;cursor:pointer">重新整理</button></div>';
+  return false;
+};
+window.onunhandledrejection=function(ev){
+  var e=document.getElementById('mc');
+  if(e)e.innerHTML='<div class="card" style="color:#c62828;padding:16px">⚠️ 非同步錯誤：'+(ev.reason&&ev.reason.message||ev.reason)+'<br><button onclick="init()" style="margin-top:8px;padding:6px 16px;background:#1a237e;color:#fff;border:none;border-radius:6px;cursor:pointer">重試</button></div>';
+};
+function $(i){return document.getElementById(i);}
+function mc(h){var e=$("mc");if(e)e.innerHTML=h;}
 async function init(){
   mc('<div class="loading"><div class="sp"></div><p>連線中，首次載入約5~15秒...</p></div>');
   try{
@@ -568,8 +583,6 @@ async function init(){
     mc('<div class="card" style="color:#c62828;padding:16px">⚠️ 載入失敗：'+e.message+'<br><button onclick="init()" style="margin-top:8px;padding:6px 16px;background:#1a237e;color:#fff;border:none;border-radius:6px;cursor:pointer">重試</button></div>');
   }
 }
-function $(i){return document.getElementById(i);}
-function mc(h){$("mc").innerHTML=h;}
 function rg(){
   $("sg").innerHTML=stocks.map(function(s){
     return '<div class="scard'+(sel===s.code?" sel":"")
