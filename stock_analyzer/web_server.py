@@ -78,14 +78,14 @@ async def _prewarm_all():
 
 async def _refresh_loop():
     while True:
-        await asyncio.sleep(1800)
+        await asyncio.sleep(300)  # 每5分鐘更新一次（原本30分鐘）
         for code in list(STOCKS.keys()):
             try:
                 result = await asyncio.to_thread(_fetch_stock_sync, code)
                 _cache_set(f'stock_{code}', result)
             except Exception:
                 pass
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
 
 @asynccontextmanager
 async def lifespan(application):
@@ -107,6 +107,13 @@ def _cache_get(key: str) -> Optional[Any]:
         data, ts = _cache[key]
         if time.time() - ts < CACHE_TTL:
             return data
+    return None
+
+
+def _cache_get_stale(key: str) -> Optional[Any]:
+    """Return cached data even if expired (stale-while-revalidate)."""
+    if key in _cache:
+        return _cache[key][0]
     return None
 
 
@@ -335,10 +342,36 @@ async def api_stock(code: str):
         _cache_set(f'stock_{code}', result)
         return result
     except Exception as e:
+        stale = _cache_get_stale(f'stock_{code}')
+        if stale:
+            return {**stale, '_stale': True, '_stale_reason': str(e)}
         return JSONResponse(status_code=500, content={
             'error': str(e), 'code': code, 'name': STOCKS[code]['name'],
             'hint': '確認電腦有連上台灣網路，且今天是交易日（週一~週五）',
         })
+
+
+@app.get('/api/val/{code}')
+async def api_valuation_light(code: str):
+    """輕量估值端點：只抓現價（1次HTTP），估值本地計算，速度快"""
+    if code not in STOCKS:
+        raise HTTPException(404)
+    cached = _cache_get(f'val_{code}')
+    if cached:
+        return cached
+
+    def _sync():
+        from fetcher import get_price
+        name = STOCKS[code]['name']
+        p = get_price(code)
+        sp = p.get('close', 0) if p else 0
+        val = calc_biotech_valuation(code, name, share_price=sp)
+        return {'code': code, 'name': name, 'price': p, 'valuation': val,
+                'updated': datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+    result = await asyncio.to_thread(_sync)
+    _cache_set(f'val_{code}', result)
+    return result
 
 
 @app.get('/api/pipeline/{code}')
@@ -746,10 +779,11 @@ async function tCat(){
 /* ── 籌碼 ── */
 async function tChip(){
   if(!sel){mc(nos());return;}
-  mc(ld("籌碼資料（首次約10~30秒）"));
+  mc(ld("籌碼資料（並行抓取中）"));
   try{
     var d=await jcached("/api/stock/"+sel);
     if(d.error){mc(nerr(d.error,d.hint));return;}
+    if(d._stale)mc('<div style="color:#fb8c00;font-size:12px;padding:4px 8px">⏱ 顯示快取資料（'+(d.updated||'')+'），背景更新中...</div>');
     var chip=d.chip||{},inst=chip.institutional||{},marg=chip.margin||{};
     var h=edu("<b>三大法人</b>是市場主力：外資（外國大機構）、投信（台灣基金）、自營商（券商自己錢）。"
       +"<br>他們連續買進=強力看多；突然大量賣出=要警戒。"
@@ -800,7 +834,7 @@ async function tVal(){
   if(!sel){mc(nos());return;}
   mc(ld("估值計算"));
   try{
-    var d=await jcached("/api/stock/"+sel);
+    var d=await jcached("/api/val/"+sel);
     if(d.error){mc(nerr(d.error,d.hint));return;}
     var val=d.valuation,price=d.price;
     var curPrice=price?(price.close||0):0;

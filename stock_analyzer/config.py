@@ -336,6 +336,6 @@ REQUEST_HEADERS = {
     'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
 }
 
-REQUEST_TIMEOUT = 15   # 秒
-RETRY_TIMES = 3
-RETRY_DELAY = 2        # 秒
+REQUEST_TIMEOUT = 8    # 秒（Railway 美國→台灣，8秒足夠）
+RETRY_TIMES = 1        # 不重試，失敗就快速失敗
+RETRY_DELAY = 0        # 無延遲

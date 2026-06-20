@@ -6,6 +6,7 @@
 import time
 import json
 import requests
+import concurrent.futures
 from datetime import datetime, timedelta
 from config import REQUEST_HEADERS, REQUEST_TIMEOUT, RETRY_TIMES, RETRY_DELAY
 
@@ -150,19 +151,13 @@ def get_price(code: str, date: str = None) -> dict | None:
 
 
 def get_price_history(code: str, days: int = 60) -> list[dict]:
-    """取得近 N 個交易日的股價（自動跳過假日）"""
-    results = []
-    offset = 0
-    attempts = 0
-    while len(results) < days and attempts < days * 2:
-        d = _last_trading_day(offset)
-        price = get_price(code, d)
-        if price:
-            results.append(price)
-        offset += 1
-        attempts += 1
-        time.sleep(0.3)
-    return list(reversed(results))
+    """取得近 N 個交易日的股價（並行抓取，大幅加速）"""
+    candidate_dates = [_last_trading_day(i) for i in range(days * 2)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(candidate_dates))) as ex:
+        futures = {ex.submit(get_price, code, d): d for d in candidate_dates}
+        raw = [f.result() for f in concurrent.futures.as_completed(futures)]
+    results = sorted([r for r in raw if r], key=lambda x: x.get('date', ''))
+    return results[-days:]
 
 
 # ── 三大法人 ──────────────────────────────────────────────────
@@ -230,18 +225,12 @@ def get_institutional(code: str, date: str = None) -> dict | None:
 
 
 def get_institutional_history(code: str, days: int = 20) -> list[dict]:
-    results = []
-    offset = 0
-    attempts = 0
-    while len(results) < days and attempts < days * 2:
-        d = _last_trading_day(offset)
-        data = get_institutional(code, d)
-        if data:
-            results.append(data)
-        offset += 1
-        attempts += 1
-        time.sleep(0.3)
-    return list(reversed(results))
+    candidate_dates = [_last_trading_day(i) for i in range(days * 2)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(candidate_dates))) as ex:
+        futures = {ex.submit(get_institutional, code, d): d for d in candidate_dates}
+        raw = [f.result() for f in concurrent.futures.as_completed(futures)]
+    results = sorted([r for r in raw if r], key=lambda x: x.get('date', ''))
+    return results[-days:]
 
 
 # ── 融資融券 ──────────────────────────────────────────────────
@@ -321,18 +310,12 @@ def get_margin(code: str, date: str = None) -> dict | None:
 
 
 def get_margin_history(code: str, days: int = 20) -> list[dict]:
-    results = []
-    offset = 0
-    attempts = 0
-    while len(results) < days and attempts < days * 2:
-        d = _last_trading_day(offset)
-        data = get_margin(code, d)
-        if data:
-            results.append(data)
-        offset += 1
-        attempts += 1
-        time.sleep(0.3)
-    return list(reversed(results))
+    candidate_dates = [_last_trading_day(i) for i in range(days * 2)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(candidate_dates))) as ex:
+        futures = {ex.submit(get_margin, code, d): d for d in candidate_dates}
+        raw = [f.result() for f in concurrent.futures.as_completed(futures)]
+    results = sorted([r for r in raw if r], key=lambda x: x.get('date', ''))
+    return results[-days:]
 
 
 # ── 重大訊息（公開資訊觀測站）────────────────────────────────
