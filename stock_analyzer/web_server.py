@@ -561,10 +561,14 @@ td{padding:7px 6px;border-bottom:1px solid #f0f0f0;vertical-align:middle;}
 </html>'''
 
 _JS_CODE = """
+console.log('[biotech] JS loaded, checking DOM...');
 (function(){
   var e=document.getElementById('mc');
+  console.log('[biotech] mc element:', e ? 'FOUND id='+e.id : 'NULL - not found!');
   if(e)e.innerHTML='<div class="loading"><div class="sp"></div><p>連線中，首次載入約5~15秒...</p></div>';
+  else document.body&&(document.body.style.background='red');
 })();
+console.log('[biotech] IIFE done');
 var stocks=[],sel=null,tab="cat",cache={};
 window.onerror=function(msg,src,ln){
   var e=document.getElementById('mc');
