@@ -553,7 +553,7 @@ td{padding:7px 6px;border-bottom:1px solid #f0f0f0;vertical-align:middle;}
   <div class="tab"     data-t="news" onclick="sw(this)">📰 新聞</div>
 </div>
 <div class="wrap" id="mc">
-  <div class="loading"><div class="sp"></div><p>載入中...</p></div>
+  <div class="loading"><div class="sp"></div><p>初始化中...</p></div>
 </div>
 <script>
 var stocks=[],sel=null,tab="cat",cache={};
