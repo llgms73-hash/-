@@ -13,6 +13,7 @@ import time
 import asyncio
 import secrets
 import argparse
+import concurrent.futures
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Optional
@@ -40,9 +41,14 @@ def _fetch_stock_sync(code: str) -> dict:
     from fetcher import get_price, get_price_history
     from chip import full_chip_report
     from alerts import check_price_alerts, check_chip_alerts, check_valuation_alerts
-    price = get_price(code)
-    price_hist = get_price_history(code, 20)
-    chip = full_chip_report(code, name)
+    # Fetch price, history, chip in parallel to reduce latency
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+        f_price = ex.submit(get_price, code)
+        f_hist  = ex.submit(get_price_history, code, 20)
+        f_chip  = ex.submit(full_chip_report, code, name)
+        price = f_price.result()
+        price_hist = f_hist.result()
+        chip = f_chip.result()
     val = None
     val_alerts = []
     if stock_type == 'biotech':
@@ -250,6 +256,32 @@ async def api_stocks():
         }
         for code, info in STOCKS.items()
     ]
+
+
+@app.get('/api/prices')
+async def api_prices():
+    cached = _cache.get('_prices_light')
+    if cached:
+        data, ts = cached
+        if time.time() - ts < 300:  # 5-minute TTL for prices
+            return data
+
+    async def _fetch_one(code):
+        def _sync():
+            from fetcher import get_price, get_price_history
+            p = get_price(code)
+            hist = get_price_history(code, 15)
+            closes = [h['close'] for h in (hist or []) if h and h.get('close')]
+            return {'price': p, 'closes': closes}
+        try:
+            return code, await asyncio.to_thread(_sync)
+        except Exception:
+            return code, {}
+
+    pairs = await asyncio.gather(*[_fetch_one(c) for c in STOCKS])
+    result = dict(pairs)
+    _cache['_prices_light'] = (result, time.time())
+    return result
 
 
 @app.get('/api/catalyst')
@@ -598,7 +630,7 @@ console.log('[biotech] JS loaded, checking DOM...');
   else document.body&&(document.body.style.background='red');
 })();
 console.log('[biotech] IIFE done');
-var stocks=[],sel=null,tab="cat",cache={};
+var stocks=[],sel=null,tab="cat",cache={},prices={};
 window.onerror=function(msg,src,ln){
   var e=document.getElementById('mc');
   if(e)e.innerHTML='<div class="card" style="color:#c62828;padding:16px">⚠️ JS錯誤：'+msg+' (行'+ln+')<br><button onclick="location.reload()" style="margin-top:8px;padding:6px 16px;background:#1a237e;color:#fff;border:none;border-radius:6px;cursor:pointer">重新整理</button></div>';
@@ -610,23 +642,55 @@ window.onunhandledrejection=function(ev){
 };
 function $(i){return document.getElementById(i);}
 function mc(h){var e=$("mc");if(e)e.innerHTML=h;}
+function sparkline(closes){
+  if(!closes||closes.length<2)return'';
+  var w=64,h=22,mn=Math.min.apply(null,closes),mx=Math.max.apply(null,closes),rng=mx-mn||1;
+  var pts=closes.map(function(v,i){
+    return(i/(closes.length-1)*w).toFixed(1)+','+(h-((v-mn)/rng*(h-3)+1.5)).toFixed(1);
+  }).join(' ');
+  var up=closes[closes.length-1]>=closes[0];
+  return'<svg width="'+w+'" height="'+h+'" style="display:inline-block;vertical-align:middle;margin-left:2px">'
+    +'<polyline fill="none" stroke="'+(up?'#e53935':'#43a047')+'" stroke-width="1.8" stroke-linejoin="round" points="'+pts+'"/>'
+    +'</svg>';
+}
+async function loadPrices(){
+  try{
+    var d=await jget("/api/prices");
+    prices=d;rg();
+  }catch(e){}
+}
 async function init(){
   mc('<div class="loading"><div class="sp"></div><p>連線中，首次載入約15~45秒...</p></div>');
   try{
     stocks=await jget("/api/stocks");
     rg();rt();
+    loadPrices();
+    setInterval(loadPrices,300000);
   }catch(e){
     mc('<div class="card" style="color:#c62828;padding:16px">⚠️ 載入失敗：'+e.message+'<br><button onclick="init()" style="margin-top:8px;padding:6px 16px;background:#1a237e;color:#fff;border:none;border-radius:6px;cursor:pointer">重試</button></div>');
   }
 }
 function rg(){
   $("sg").innerHTML=stocks.map(function(s){
+    var pi=prices[s.code]||{},p=pi.price||{};
+    var priceRow='';
+    if(p.close){
+      var chg=p.change||0,pct=p.change_pct||0;
+      var up=chg>=0,c=up?'#e53935':'#43a047',arr=up?'▲':'▼';
+      priceRow='<div style="display:flex;align-items:center;gap:4px;margin-top:3px;flex-wrap:wrap">'
+        +'<span style="font-size:16px;font-weight:700;color:'+c+'">'+p.close.toFixed(1)+'</span>'
+        +'<span style="font-size:11px;color:'+c+'">'+arr+Math.abs(chg).toFixed(2)
+        +(Math.abs(pct)>0?' ('+Math.abs(pct).toFixed(1)+'%)':'')+' 元</span>'
+        +(pi.closes&&pi.closes.length>1?sparkline(pi.closes):'')
+        +'</div>';
+    }
     return '<div class="scard'+(sel===s.code?" sel":"")
       +'" onclick="ss(\\\''+s.code+'\\\')">'
       +'<div class="scode">'+s.code+'</div>'
       +'<div class="sname">'+s.name+'</div>'
       +'<div><span class="badge '+(s.type==="biotech"?"bb":"bg")+'">'
       +(s.type==="biotech"?"🔬生技":"📈一般")+'</span></div>'
+      +priceRow
       +'<div class="mlbl">'+s.market_label+"&nbsp;·&nbsp;"+s.products_count+"項產品</div>"
       +"</div>";
   }).join("");
