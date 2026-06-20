@@ -76,8 +76,16 @@ def _fetch_stock_sync(code: str) -> dict:
         'updated': datetime.now().strftime('%Y-%m-%d %H:%M'),
     }
 
+async def _prewarm_prices():
+    """啟動後立即暖機 prices 快取（約 3~5 秒完成）"""
+    try:
+        await api_prices()
+    except Exception:
+        pass
+
 async def _prewarm_all():
     await asyncio.sleep(5)
+    asyncio.create_task(_prewarm_prices())   # 並行：prices 快取（快）
     for code in list(STOCKS.keys()):
         if not _cache_get(f'stock_{code}'):
             try:
@@ -288,9 +296,13 @@ async def api_prices():
         def _sync():
             from fetcher import get_price, get_price_history
             p = get_price(code)
-            hist = get_price_history(code, 15)
+            hist = get_price_history(code, 5)   # 5 天夠畫 sparkline，快 3 倍
             closes = [h['close'] for h in (hist or []) if h and h.get('close')]
-            return {'price': p, 'closes': closes}
+            chg_pct = 0.0
+            if p and p.get('close') and p.get('change'):
+                prev = p['close'] - p['change']
+                chg_pct = round(p['change'] / prev * 100, 2) if prev else 0
+            return {'price': p, 'closes': closes, 'chg_pct': chg_pct}
         try:
             return code, await asyncio.to_thread(_sync)
         except Exception:
@@ -686,15 +698,17 @@ window.onunhandledrejection=function(ev){
 };
 function $(i){return document.getElementById(i);}
 function mc(h){var e=$("mc");if(e)e.innerHTML=h;}
-function sparkline(closes){
+function sparkline(closes,w){
   if(!closes||closes.length<2)return'';
-  var w=64,h=22,mn=Math.min.apply(null,closes),mx=Math.max.apply(null,closes),rng=mx-mn||1;
+  w=w||120;var h=32;
+  var mn=Math.min.apply(null,closes),mx=Math.max.apply(null,closes),rng=mx-mn||1;
   var pts=closes.map(function(v,i){
-    return(i/(closes.length-1)*w).toFixed(1)+','+(h-((v-mn)/rng*(h-3)+1.5)).toFixed(1);
+    return(i/(closes.length-1)*w).toFixed(1)+','+(h-((v-mn)/rng*(h-5)+2.5)).toFixed(1);
   }).join(' ');
   var up=closes[closes.length-1]>=closes[0];
-  return'<svg width="'+w+'" height="'+h+'" style="display:inline-block;vertical-align:middle;margin-left:2px">'
-    +'<polyline fill="none" stroke="'+(up?'#e53935':'#43a047')+'" stroke-width="1.8" stroke-linejoin="round" points="'+pts+'"/>'
+  var col=up?'#e53935':'#43a047';
+  return'<svg width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'" style="display:block;width:100%;margin-top:4px">'
+    +'<polyline fill="none" stroke="'+col+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="'+pts+'"/>'
     +'</svg>';
 }
 async function loadPrices(){
@@ -704,7 +718,7 @@ async function loadPrices(){
   }catch(e){}
 }
 async function init(){
-  mc('<div class="loading"><div class="sp"></div><p>連線中，首次載入約15~45秒...</p></div>');
+  mc('<div class="loading"><div class="sp"></div><p>連線中，首次載入約15~30秒...</p></div>');
   try{
     stocks=await jget("/api/stocks");
     rg();rt();
@@ -717,17 +731,20 @@ async function init(){
 function rg(){
   $("sg").innerHTML=stocks.map(function(s){
     var pi=prices[s.code]||{},p=pi.price||{};
-    var priceRow='';
+    var pct=pi.chg_pct||0;
+    var priceRow='<div style="margin-top:5px;min-height:52px">';
     if(p.close){
-      var chg=p.change||0,pct=p.change_pct||0;
-      var up=chg>=0,c=up?'#e53935':'#43a047',arr=up?'▲':'▼';
-      priceRow='<div style="display:flex;align-items:center;gap:4px;margin-top:3px;flex-wrap:wrap">'
-        +'<span style="font-size:16px;font-weight:700;color:'+c+'">'+p.close.toFixed(1)+'</span>'
-        +'<span style="font-size:11px;color:'+c+'">'+arr+Math.abs(chg).toFixed(2)
-        +(Math.abs(pct)>0?' ('+Math.abs(pct).toFixed(1)+'%)':'')+' 元</span>'
-        +(pi.closes&&pi.closes.length>1?sparkline(pi.closes):'')
-        +'</div>';
+      var chg=p.change||0,up=chg>=0,c=up?'#e53935':'#43a047',arr=up?'▲':'▼';
+      priceRow+='<div style="display:flex;align-items:baseline;gap:5px">'
+        +'<span style="font-size:20px;font-weight:800;color:'+c+';letter-spacing:-0.5px">'+p.close.toFixed(1)+'</span>'
+        +'<span style="font-size:11px;color:'+c+';font-weight:700">'+arr+Math.abs(chg).toFixed(2)
+        +(Math.abs(pct)>0?' ('+Math.abs(pct).toFixed(1)+'%)':'')+'</span>'
+        +'</div>'
+        +(pi.closes&&pi.closes.length>1?sparkline(pi.closes):'');
+    }else{
+      priceRow+='<div style="font-size:11px;color:#aaa;padding-top:8px">⏳ 股價載入中...</div>';
     }
+    priceRow+='</div>';
     return '<div class="scard'+(sel===s.code?" sel":"")
       +'" onclick="ss(\\\''+s.code+'\\\')">'
       +'<div class="scode">'+s.code+'</div>'
