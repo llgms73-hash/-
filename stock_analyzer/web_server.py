@@ -55,16 +55,33 @@ def _cache_set(key: str, data: Any) -> None:
 WEB_USERNAME = 'admin'        # 修改帳號
 WEB_PASSWORD = 'biotech2026'  # 修改密碼
 
+import hashlib as _hashlib
+
+def _sign_token(token: str) -> str:
+    """用固定密鑰簽署 token，讓 session 在 server 重啟後仍有效"""
+    secret = f"{WEB_USERNAME}:{WEB_PASSWORD}:biotech_salt_2026"
+    return _hashlib.sha256(f"{secret}:{token}".encode()).hexdigest()[:16]
+
+def _valid_token(token: str) -> bool:
+    """驗證 token 格式：<random>.<signature>"""
+    if not token or '.' not in token:
+        return False
+    parts = token.rsplit('.', 1)
+    if len(parts) != 2:
+        return False
+    rand, sig = parts
+    return _sign_token(rand) == sig
+
 _sessions: set = set()
 
 
 class _AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        if path in ('/login', '/logout'):
+        if path in ('/login', '/logout', '/api/health'):
             return await call_next(request)
         token = request.cookies.get('session')
-        if token not in _sessions:
+        if not (token in _sessions or _valid_token(token or '')):
             if path.startswith('/api/'):
                 return JSONResponse({'error': '請先登入', 'redirect': '/login'}, status_code=401)
             return RedirectResponse('/login', status_code=302)
@@ -133,10 +150,11 @@ async def login_page(request: Request):
 @app.post('/login')
 async def login_post(username: str = Form(...), password: str = Form(...)):
     if username.strip() == WEB_USERNAME and password == WEB_PASSWORD:
-        token = secrets.token_urlsafe(32)
+        rand = secrets.token_urlsafe(24)
+        token = f"{rand}.{_sign_token(rand)}"
         _sessions.add(token)
         r = RedirectResponse(url='/', status_code=303)
-        r.set_cookie('session', token, httponly=True, samesite='strict', max_age=86400 * 7)
+        r.set_cookie('session', token, httponly=True, samesite='lax', max_age=86400 * 30)
         return r
     return HTMLResponse(content=_LOGIN_HTML.replace(
         'id="errmsg"', 'id="errmsg" style="display:block"'), status_code=401)
